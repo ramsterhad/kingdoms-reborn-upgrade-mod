@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v20
+    KRBuildingUpgrades v21
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -247,11 +247,26 @@ local function FindLive(WantedClass, Verbose)
     return Live
 end
 
+--[[
+    The function first, the property only as a fallback.
+
+    UTextBlock::GetText asks the live Slate widget and falls back to the
+    property itself; reading .Text directly only ever gives the property.
+    Those differ whenever the text is driven by a binding, because a bound
+    TextDelegate never writes back to the property.
+
+    The HUD resource bar is exactly that case: all 23 entries report the
+    design-time placeholder "1,000" through the property while the screen
+    shows the real stock. Everything scraped so far happened not to be
+    bound, which is why this went unnoticed.
+]]
 local function ReadText(W)
-    local ok, T = pcall(function() return W.Text end)
-    if not ok or not T then return nil end
-    local ok2, S = pcall(function() return T:ToString() end)
-    if ok2 and S and S ~= "" then return S end
+    local S = nil
+    pcall(function() S = W:GetText():ToString() end)
+    if S and S ~= "" then return S end
+
+    pcall(function() S = W.Text:ToString() end)
+    if S and S ~= "" then return S end
     return nil
 end
 
@@ -2044,6 +2059,16 @@ end
 ]]
 local LastSelected = { key = nil, ord = nil }
 
+-- A purchase the player asked for while the wrong building was selected.
+-- Held until the jump has brought the right panel up.
+local Pending = { key = nil, ord = nil, label = nil, tries = 0 }
+local CompletePendingPurchase
+
+local function QueuePurchase(Key, Ord, Label)
+    Pending.key, Pending.ord, Pending.label = Key, Ord, Label
+    Pending.tries = 30
+end
+
 --[[
     A purchase is the one moment the panel knows exactly what changed.
 
@@ -2264,6 +2289,17 @@ local function ActivateRow(M)
 
     if M.kind ~= "upgrade" then return end
 
+    --[[
+        One click, not two.
+
+        The purchase handler only exists as a widget inside the open
+        description panel, so a building that is not selected genuinely
+        cannot be bought from here - that part is the game's doing. What was
+        ours was making the player click again afterwards. Now the click is
+        remembered and completed by itself as soon as the jump has brought
+        the right panel up, which the fast loop notices within a fraction of
+        a second.
+    ]]
     local err = FireUpgrade(M.key, M.label, M.ord)
     if not err then
         -- Show it as bought straight away, and point the once-a-second
@@ -2289,9 +2325,39 @@ local function ActivateRow(M)
     if JErr then
         SetNotice("%s (%s)", err, JErr)
     else
-        SetNotice("%s - jumping to %s%s, click again",
-            err, M.key, Where(Index, Total))
+        QueuePurchase(M.key, M.ord, M.label)
+        SetNotice("buying %s - jumping to %s%s", M.label, M.key, Where(Index, Total))
+        -- The panel says what it is doing; the log says why it had to.
+        Log("  had to jump first: " .. err)
     end
+end
+
+--[[
+    Finish a purchase that had to jump first.
+
+    Driven by the fast loop rather than the once-a-second one, so the buy
+    lands right after the panel appears instead of up to a second later.
+    FireUpgrade does the checking - right building, upgrade still on offer -
+    so a stale or impossible attempt simply keeps failing until the attempts
+    run out.
+]]
+function CompletePendingPurchase()
+    if not Pending.label then return end
+
+    Pending.tries = Pending.tries - 1
+    if Pending.tries <= 0 then
+        SetNotice("could not buy %s - try again", Pending.label)
+        Pending.key, Pending.ord, Pending.label = nil, nil, nil
+        return
+    end
+
+    if FireUpgrade(Pending.key, Pending.label, Pending.ord) then return end
+
+    MarkBought(Pending.key, Pending.ord, Pending.label)
+    if Pending.ord then LastSelected.key, LastSelected.ord = Pending.key, Pending.ord end
+    SetNotice("bought: %s", Pending.label)
+    Pending.key, Pending.ord, Pending.label = nil, nil, nil
+    pcall(RefreshOverlay)
 end
 
 --==========================================================================--
@@ -2833,6 +2899,40 @@ local function DumpResourceEntry(W, Label, Depth)
 
     DumpSafeProperties(W, Indent .. "  . ")
 
+    --[[
+        Into the named parts, which is where the answer has to be if it is
+        anywhere.
+
+        The entries are UserWidgets, so they have no GetChildAt children at
+        all - the first probe walked those and therefore never looked at the
+        icon or the button. Nothing on the entry itself named a resource,
+        so these are what is left: a tooltip on the button, or a brush on
+        the icon that differs per resource.
+    ]]
+    for _, PName in ipairs({ "IconImage", "BackgroundButton", "PrefixText",
+                             "SuffixText", "OuterOverlay", "FrontCheckBox" }) do
+        local Sub = nil
+        pcall(function() Sub = W[PName] end)
+        if IsValidObj(Sub) then
+            local Line = string.format("%s  %s [%s]", Indent, PName, ClassName(Sub))
+            local Tip = ReadFTextProp(Sub, "ToolTipText")
+            if Tip then Line = Line .. string.format(" tooltip=%q", Tip) end
+            local Txt = ReadText(Sub)
+            if Txt then Line = Line .. string.format(" text=%q", Txt) end
+            Log(Line)
+
+            local TipW = nil
+            pcall(function() TipW = Sub["TooltipWidget"] end)
+            if IsValidObj(TipW) then
+                Log(string.format("%s    tooltipWidget [%s] text=%q", Indent,
+                    ClassName(TipW), DeepText(TipW, 0) or "?"))
+            end
+            if ClassName(Sub):find("Image", 1, true) then
+                DumpBrush(Sub, Indent .. "    ")
+            end
+        end
+    end
+
     for i = 0, math.min(ChildCount(W), 8) - 1 do
         DumpResourceEntry(ChildAt(W, i), string.format("Child[%d]", i), Depth + 1)
     end
@@ -3120,13 +3220,15 @@ LoopAsync(POLL_MS, function()
         pcall(PollClicks)
         -- Driven from the same loop rather than a timer: a scan step has to
         -- happen between frames anyway, and this way stopping it is always
-        -- one poll away.
+        -- one poll away. A queued purchase rides along so it lands as soon
+        -- as the jump has brought its panel up.
         pcall(ScanStep)
+        pcall(CompletePendingPurchase)
     end)
     return false
 end)
 
-Log("KRBuildingUpgrades v20 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v21 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
