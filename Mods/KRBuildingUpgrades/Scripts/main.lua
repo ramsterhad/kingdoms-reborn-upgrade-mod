@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v18
+    KRBuildingUpgrades v19
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -2655,6 +2655,209 @@ local function DumpDescriptionUI()
     end
 end
 
+--==========================================================================--
+-- Resource bar probe
+--
+-- Reading the town's stockpile would let the panel colour itself without
+-- any building window being open. Reading the numbers is the easy half;
+-- knowing WHICH resource each entry is, is the problem.
+--
+-- What the object dump already settled, offline:
+--   * PunHUD._mainGameUI exists, and MainGameUI.MainResourceList is a
+--     UMG.HorizontalBox.
+--   * That box is filled by C++ at runtime, so its children do not appear
+--     in the dump at all - same situation as BuildingsStatBox.
+--   * There are NO per-resource icon textures. Searching for Glass,
+--     IronBar, Wood, Brick, Concrete, Paper, SteelTools as Texture2D names
+--     returns nothing, so the icons come from an atlas or material and
+--     Brush.ResourceObject will not name the resource.
+--
+-- So identification has to come from somewhere else, and the candidates
+-- can only be checked by looking once. This writes down everything that
+-- might carry a name - tooltips, every text property, the brush, the whole
+-- property list of every widget involved - so one game start settles it
+-- instead of several.
+--==========================================================================--
+
+local PROBE_MAX_ENTRIES = 40
+local PROBE_MAX_DEPTH   = 3
+
+local function GetMainGameUI()
+    local HUD = GetHUD(false)
+    if not HUD then return nil end
+    local UI = nil
+    pcall(function() UI = HUD["_mainGameUI"] end)
+    if not IsValidObj(UI) then return nil end
+    return UI
+end
+
+-- ToolTipText is an FText on a property of its own, not the .Text that
+-- ReadText looks at, so it needs its own reader.
+local function ReadFTextProp(W, PName)
+    local ok, T = pcall(function() return W[PName] end)
+    if not ok or not T then return nil end
+    local ok2, S = pcall(function() return T:ToString() end)
+    if ok2 and S and S ~= "" then return S end
+    return nil
+end
+
+-- Everything an Image might reveal about which resource it shows.
+local function DumpBrush(W, Indent)
+    local Name, Obj, Tint = nil, nil, nil
+    pcall(function() Name = W.Brush.ResourceName:ToString() end)
+    pcall(function()
+        local RO = W.Brush.ResourceObject
+        if IsValidObj(RO) then Obj = FullName(RO) end
+    end)
+    pcall(function()
+        local T = W.Brush.TintColor.SpecifiedColor
+        Tint = string.format("%.2f,%.2f,%.2f,%.2f", T.R, T.G, T.B, T.A)
+    end)
+    if Name or Obj or Tint then
+        Log(string.format("%sbrush: name=%s tint=%s", Indent,
+            (Name and Name ~= "") and Name or "<empty>", Tint or "?"))
+        if Obj then Log(string.format("%s       object=%s", Indent, Obj)) end
+    end
+end
+
+--[[
+    Every readable property of a widget, whatever its type.
+
+    Deliberately indiscriminate: the whole point is that we do not yet know
+    which field carries the resource name, so anything that can be turned
+    into a string gets written down.
+]]
+local function DumpEveryProperty(W, Indent)
+    local Class = nil
+    if not pcall(function() Class = W:GetClass() end) then return end
+
+    local Guard = 0
+    while Class and IsValidObj(Class) and Guard < 8 do
+        Guard = Guard + 1
+        pcall(function()
+            Class:ForEachProperty(function(Prop)
+                local PName = nil
+                if not pcall(function() PName = Prop:GetFName():ToString() end) then return end
+                if not PName or PName == "" then return end
+                -- Parent/Slot/Outer walk back up the tree and add nothing.
+                if PName == "Parent" or PName == "Slot" or PName == "Outer"
+                   or PName == "WidgetTree" or PName == "Animations" then return end
+
+                local Val = nil
+                pcall(function() Val = W[PName] end)
+                if Val == nil then return end
+
+                local T = type(Val)
+                if T == "number" or T == "boolean" or T == "string" then
+                    Log(string.format("%s%s = %s", Indent, PName, tostring(Val)))
+                    return
+                end
+
+                -- FText / FName carry a ToString; objects carry a class.
+                local S = nil
+                pcall(function() S = Val:ToString() end)
+                if S and S ~= "" then
+                    Log(string.format("%s%s = %q", Indent, PName, S))
+                    return
+                end
+
+                if IsValidObj(Val) then
+                    local Txt = DeepText(Val, 0)
+                    Log(string.format("%s%s -> [%s]%s", Indent, PName, ClassName(Val),
+                        Txt and string.format(" text=%q", Txt) or ""))
+                end
+            end)
+        end)
+
+        local okS, Super = pcall(function() return Class:GetSuperStruct() end)
+        if not okS then return end
+        Class = Super
+    end
+end
+
+local function DumpResourceEntry(W, Label, Depth)
+    if not IsValidObj(W) or Depth > PROBE_MAX_DEPTH then return end
+    local Indent = string.rep("  ", Depth + 1)
+
+    Log(string.format("%s%s [%s] %s", Indent, Label, ClassName(W), FullName(W)))
+
+    local Txt = ReadText(W) or DeepText(W, 0)
+    if Txt then Log(string.format("%s  text = %q", Indent, Txt)) end
+
+    -- The three places a resource name could plausibly live.
+    local Tip = ReadFTextProp(W, "ToolTipText")
+    if Tip then Log(string.format("%s  ToolTipText = %q", Indent, Tip)) end
+    local TipW = nil
+    pcall(function() TipW = W["TooltipWidget"] end)
+    if IsValidObj(TipW) then
+        Log(string.format("%s  TooltipWidget -> [%s] text=%q", Indent,
+            ClassName(TipW), DeepText(TipW, 0) or "?"))
+    end
+    if ClassName(W):find("Image", 1, true) then DumpBrush(W, Indent .. "  ") end
+
+    DumpEveryProperty(W, Indent .. "  . ")
+
+    for i = 0, math.min(ChildCount(W), 8) - 1 do
+        DumpResourceEntry(ChildAt(W, i), string.format("Child[%d]", i), Depth + 1)
+    end
+end
+
+local function DumpResourceBar()
+    local UI = GetMainGameUI()
+    if not UI then
+        Log("ERROR: MainGameUI unreachable - PunHUD._mainGameUI invalid")
+        return
+    end
+    Log("_mainGameUI = " .. FullName(UI))
+
+    -- Everything on MainGameUI that sounded resource-related in the dump.
+    for _, PName in ipairs({ "MainResourceList", "ResourceListScrollBox",
+                             "ResourceOverlay", "StorageSpaceText",
+                             "StorageSpaceBox" }) do
+        local W = nil
+        pcall(function() W = UI[PName] end)
+        Log("")
+        Log(string.format("### %s ###", PName))
+        if not IsValidObj(W) then
+            Log("  invalid or not present")
+        else
+            Log(string.format("  [%s] %s, %d children",
+                ClassName(W), FullName(W), ChildCount(W)))
+            local N = math.min(ChildCount(W), PROBE_MAX_ENTRIES)
+            for i = 0, N - 1 do
+                Log("")
+                DumpResourceEntry(ChildAt(W, i), string.format("Entry[%d]", i), 0)
+            end
+            if ChildCount(W) > N then
+                Log(string.format("  ... %d more not shown", ChildCount(W) - N))
+            end
+        end
+    end
+
+    --[[
+        The answer key.
+
+        Whatever the entries turn out to say, it only helps if it can be
+        matched to the resource names the upgrade prices use. Those come
+        from the description panel as plain words like "Stone" or
+        "SteelBeam", so the names already collected are written alongside
+        for comparison.
+    ]]
+    Log("")
+    Log("### resource names seen in upgrade prices so far ###")
+    local Seen = {}
+    for _, B in ipairs(ScanData.Buildings) do
+        for _, U in ipairs(B.upgrades) do
+            local R = U.cost and U.cost:match("^(%S+)%s+%d+$")
+            if R then Seen[R] = (Seen[R] or 0) + 1 end
+        end
+    end
+    for _, K in ipairs(SortedKeys(Seen)) do
+        Log(string.format("  %-16s in %d prices", K, Seen[K]))
+    end
+    if not next(Seen) then Log("  none yet - run 'collect all information' first") end
+end
+
 local function DumpStatisticsUI()
     local HUD = GetHUD(true)
     if not HUD then return end
@@ -2744,7 +2947,37 @@ local function AutoDump(Kind)
         RunDump("StatisticsUI (automatic)", DumpStatisticsUI)
     elseif Kind == "description" then
         RunDump("ObjectDescriptionUI (automatic)", DumpDescriptionUI)
+    elseif Kind == "resources" then
+        RunDump("Resource bar (automatic)", DumpResourceBar)
     end
+end
+
+--[[
+    Fires itself once the bar actually holds something.
+
+    C++ fills it, so at the main menu and during loading it is empty or
+    absent; probing then would write down nothing and burn the one shot.
+    It waits for children to appear and gives up after a while rather than
+    checking forever.
+]]
+local ResourceProbe = { Attempts = 0 }
+local RESOURCE_PROBE_GIVE_UP = 300
+
+local function ProbeResourceBar()
+    if AutoDumped["resources"] or ResourceProbe.Attempts >= RESOURCE_PROBE_GIVE_UP then
+        return
+    end
+    ResourceProbe.Attempts = ResourceProbe.Attempts + 1
+
+    local UI = GetMainGameUI()
+    if not UI then return end
+    local List = nil
+    pcall(function() List = UI["MainResourceList"] end)
+    if not IsValidObj(List) or ChildCount(List) == 0 then return end
+
+    Log(string.format("Resource bar found after %d attempts, %d entries - probing",
+        ResourceProbe.Attempts, ChildCount(List)))
+    AutoDump("resources")
 end
 
 AutoDumpHook = AutoDump
@@ -2813,6 +3046,7 @@ LoopAsync(1000, function()
             pcall(DiagTick)
         end
         pcall(HouseKeeping)
+        pcall(ProbeResourceBar)
     end)
     return false -- false = keep running
 end)
@@ -2831,7 +3065,7 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v18 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v19 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
