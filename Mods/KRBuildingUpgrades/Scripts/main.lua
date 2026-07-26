@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v19
+    KRBuildingUpgrades v20
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -2721,13 +2721,49 @@ local function DumpBrush(W, Indent)
 end
 
 --[[
-    Every readable property of a widget, whatever its type.
+    Readable properties of a widget - and only the kinds that are safe to
+    read.
 
-    Deliberately indiscriminate: the whole point is that we do not yet know
-    which field carries the resource name, so anything that can be turned
-    into a string gets written down.
+    The first version of this asked for EVERY property regardless of type
+    and called ToString on whatever came back. That crashed the game:
+
+        EXCEPTION_ACCESS_VIOLATION reading address 0x000072db
+        UUserWidget::PreConstruct()  <- game building a world-space widget
+        UWidgetComponent::TickComponent()
+
+    ExecuteInGameThread runs this inside whatever the game happens to be
+    doing, and there it was half-way through constructing a widget. Asking a
+    struct, array or delegate property for a string dereferences a pointer
+    that is not set up yet.
+
+    So this now does what DumpNamedSubWidgets has done safely since v3: ask
+    the property what type it is first, touch only object and text
+    properties, and descend only into things that really are Widgets. The
+    shared SkipProps list applies too - it exists precisely because
+    _punHUD and _callbackParent walk back up into the rest of the game.
 ]]
-local function DumpEveryProperty(W, Indent)
+local function IsWidgetObject(Obj)
+    local C, Guard = nil, 0
+    if not pcall(function() C = Obj:GetClass() end) then return false end
+    while C and IsValidObj(C) and Guard < 32 do
+        Guard = Guard + 1
+        local okN, N = pcall(function() return C:GetFName():ToString() end)
+        if not okN then return false end
+        if N == "Widget" then return true end
+        local okS, S = pcall(function() return C:GetSuperStruct() end)
+        if not okS then return false end
+        C = S
+    end
+    return false
+end
+
+local function PropIs(Prop, Kind)
+    if not Kind then return false end
+    local ok, is = pcall(function() return Prop:IsA(Kind) end)
+    return ok and is == true
+end
+
+local function DumpSafeProperties(W, Indent)
     local Class = nil
     if not pcall(function() Class = W:GetClass() end) then return end
 
@@ -2738,34 +2774,34 @@ local function DumpEveryProperty(W, Indent)
             Class:ForEachProperty(function(Prop)
                 local PName = nil
                 if not pcall(function() PName = Prop:GetFName():ToString() end) then return end
-                if not PName or PName == "" then return end
-                -- Parent/Slot/Outer walk back up the tree and add nothing.
-                if PName == "Parent" or PName == "Slot" or PName == "Outer"
-                   or PName == "WidgetTree" or PName == "Animations" then return end
+                if not PName or PName == "" or SkipProps[PName] then return end
 
-                local Val = nil
-                pcall(function() Val = W[PName] end)
-                if Val == nil then return end
-
-                local T = type(Val)
-                if T == "number" or T == "boolean" or T == "string" then
-                    Log(string.format("%s%s = %s", Indent, PName, tostring(Val)))
-                    return
+                -- Text-like properties: the likeliest place a resource name
+                -- would sit, and safe to stringify.
+                for _, Kind in ipairs({ PropertyTypes.TextProperty,
+                                        PropertyTypes.StrProperty,
+                                        PropertyTypes.NameProperty }) do
+                    if PropIs(Prop, Kind) then
+                        local S = nil
+                        pcall(function()
+                            local V = W[PName]
+                            S = (type(V) == "string") and V or V:ToString()
+                        end)
+                        if S and S ~= "" then
+                            Log(string.format("%s%s = %q", Indent, PName, S))
+                        end
+                        return
+                    end
                 end
 
-                -- FText / FName carry a ToString; objects carry a class.
-                local S = nil
-                pcall(function() S = Val:ToString() end)
-                if S and S ~= "" then
-                    Log(string.format("%s%s = %q", Indent, PName, S))
-                    return
-                end
+                if not PropIs(Prop, PropertyTypes.ObjectProperty) then return end
 
-                if IsValidObj(Val) then
-                    local Txt = DeepText(Val, 0)
-                    Log(string.format("%s%s -> [%s]%s", Indent, PName, ClassName(Val),
-                        Txt and string.format(" text=%q", Txt) or ""))
-                end
+                local Sub = nil
+                if not pcall(function() Sub = W[PName] end) then return end
+                if not IsValidObj(Sub) or not IsWidgetObject(Sub) then return end
+
+                Log(string.format("%s%s -> [%s]%s", Indent, PName, ClassName(Sub),
+                    (DeepText(Sub, 0) and string.format(" text=%q", DeepText(Sub, 0))) or ""))
             end)
         end)
 
@@ -2795,7 +2831,7 @@ local function DumpResourceEntry(W, Label, Depth)
     end
     if ClassName(W):find("Image", 1, true) then DumpBrush(W, Indent .. "  ") end
 
-    DumpEveryProperty(W, Indent .. "  . ")
+    DumpSafeProperties(W, Indent .. "  . ")
 
     for i = 0, math.min(ChildCount(W), 8) - 1 do
         DumpResourceEntry(ChildAt(W, i), string.format("Child[%d]", i), Depth + 1)
@@ -2953,15 +2989,28 @@ local function AutoDump(Kind)
 end
 
 --[[
-    Fires itself once the bar actually holds something.
+    Fires itself, but only from a standing start.
 
-    C++ fills it, so at the main menu and during loading it is empty or
-    absent; probing then would write down nothing and burn the one shot.
-    It waits for children to appear and gives up after a while rather than
-    checking forever.
+    The crash that this gating exists for happened while the game was
+    building a world-space widget: ExecuteInGameThread had run the probe
+    nested inside UUserWidget::PreConstruct, and it read a widget that was
+    not finished being built.
+
+    Reading only safe property types (see DumpSafeProperties) removes the
+    sharp edge. Waiting for a quiet moment removes the opportunity. The
+    conditions below all mean the same thing - the game is in normal play,
+    not loading and not mid-rebuild:
+
+      * our panel is mounted, which needs a live StatisticsUI
+      * the statistics window is actually open, so its widgets are built
+      * no scan running, which would be moving the camera and the selection
+
+    Then it waits a few more ticks on top, because a window that opened
+    this instant may still be settling.
 ]]
-local ResourceProbe = { Attempts = 0 }
-local RESOURCE_PROBE_GIVE_UP = 300
+local ResourceProbe = { Attempts = 0, Settled = 0 }
+local RESOURCE_PROBE_GIVE_UP = 600
+local RESOURCE_PROBE_SETTLE  = 3
 
 local function ProbeResourceBar()
     if AutoDumped["resources"] or ResourceProbe.Attempts >= RESOURCE_PROBE_GIVE_UP then
@@ -2969,13 +3018,25 @@ local function ProbeResourceBar()
     end
     ResourceProbe.Attempts = ResourceProbe.Attempts + 1
 
+    if Scan.Active or not Overlay.Mounted or Overlay.Shown ~= true
+       or not IsValidObj(Overlay.Root) then
+        ResourceProbe.Settled = 0
+        return
+    end
+
     local UI = GetMainGameUI()
-    if not UI then return end
+    if not UI then ResourceProbe.Settled = 0 return end
     local List = nil
     pcall(function() List = UI["MainResourceList"] end)
-    if not IsValidObj(List) or ChildCount(List) == 0 then return end
+    if not IsValidObj(List) or ChildCount(List) == 0 then
+        ResourceProbe.Settled = 0
+        return
+    end
 
-    Log(string.format("Resource bar found after %d attempts, %d entries - probing",
+    ResourceProbe.Settled = ResourceProbe.Settled + 1
+    if ResourceProbe.Settled < RESOURCE_PROBE_SETTLE then return end
+
+    Log(string.format("Resource bar found after %d ticks, %d entries - probing",
         ResourceProbe.Attempts, ChildCount(List)))
     AutoDump("resources")
 end
@@ -3065,7 +3126,7 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v19 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v20 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
