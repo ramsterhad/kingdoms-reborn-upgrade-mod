@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v31
+    KRBuildingUpgrades v33
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -3590,6 +3590,57 @@ local ResourceProbe = { Attempts = 0, Settled = 0 }
 local RESOURCE_PROBE_GIVE_UP = 600
 local RESOURCE_PROBE_SETTLE  = 3
 --[[
+    Asking the game itself.
+
+    PunPlayerController carries two reflected debug functions:
+
+        PrintResourceSys()                 no parameters
+        PrintResourceSysFor(ResourceName)  an FString
+
+    The second one takes a resource NAME, so the game holds exactly the
+    name-to-resource lookup the UI refuses to expose. Neither returns
+    anything - they print - and a shipping build writes no log unless the
+    game is started with -log, so where the output lands has to be found
+    out rather than assumed.
+
+    Hence the markers around the call: whichever log picks the output up,
+    it will sit between them. Calling a parameterless UFunction is the same
+    thing the mod already does to buy an upgrade, so this adds no new kind
+    of risk.
+]]
+local ResourceSysCalled = false
+
+local function ProbeResourceSys()
+    if ResourceSysCalled then return end
+    if Scan.Active or not Overlay.Mounted or not IsValidObj(Overlay.Root) then return end
+
+    local PC = nil
+    local Found = FindAllOf("PunPlayerController")
+    for _, C in ipairs(Found or {}) do
+        if IsValidObj(C) and not FullName(C):find("Default__", 1, true) then PC = C end
+    end
+    if not PC then return end
+    ResourceSysCalled = true
+
+    local Owned = (FileHandle == nil) and OpenOut()
+    Log("=== KR_RESOURCE_SYS_BEGIN === " .. FullName(PC))
+    local ok, err = pcall(function() PC:PrintResourceSys() end)
+    Log("  PrintResourceSys() called: " .. (ok and "no error" or ("failed: " .. tostring(err))))
+
+    -- Named calls too: if the output is reachable at all, asking for one
+    -- resource by name says whether the game accepts these spellings - the
+    -- same ones the upgrade prices use.
+    for _, R in ipairs({ "Stone", "Wood", "Glass", "Brick", "IronBar" }) do
+        local ok2, err2 = pcall(function() PC:PrintResourceSysFor(R) end)
+        if not ok2 then
+            Log(string.format("  PrintResourceSysFor(%q) failed: %s", R, tostring(err2)))
+        end
+    end
+    Log("=== KR_RESOURCE_SYS_END ===")
+    if Owned then CloseOut() end
+end
+
+--[[
     What the statistics resource table actually holds, field by field.
 
     The buttons need a stock, not an identity. This row names a resource and
@@ -3599,10 +3650,19 @@ local RESOURCE_PROBE_SETTLE  = 3
     order, and either a stockpile is among them or the table genuinely has
     none and this line of enquiry is finished.
 ]]
-local ResourceTableLogged = false
+--[[
+    Never done, only ever better than last time.
+
+    The first version wrote itself off after one look and caught the table
+    at its emptiest: two template rows and a bar still showing its
+    design-time 1000s. Then it never looked again, so the session was spent.
+    The table fills up as the player opens the tab that builds it, so the
+    only sound rule is to report whenever there is more to report than
+    before.
+]]
+local ResourceTableBest = 0
 
 local function ProbeResourceTable()
-    if ResourceTableLogged then return end
     if Scan.Active or not Overlay.Mounted or not IsValidObj(Overlay.Root) then return end
 
     local Rows = FindAllOf("ResourceStatTableRow_C")
@@ -3618,8 +3678,8 @@ local function ProbeResourceTable()
             if Name and Name ~= "" then Live[#Live + 1] = { Row = Row, Name = Name } end
         end
     end
-    if #Live == 0 then return end
-    ResourceTableLogged = true
+    if #Live <= ResourceTableBest then return end
+    ResourceTableBest = #Live
 
     local Owned = (FileHandle == nil) and OpenOut()
     Log(string.format("=== statistics resource table: %d named rows, every text field ===",
@@ -3741,6 +3801,7 @@ LoopAsync(1000, function()
         pcall(HouseKeeping)
         pcall(ProbeResourceBar)
         pcall(ProbeResourceTable)
+        pcall(ProbeResourceSys)
     end)
     return false -- false = keep running
 end)
@@ -3765,7 +3826,7 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v31 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v33 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
