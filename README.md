@@ -1,11 +1,9 @@
-# Kingdoms Reborn – Upgrade-Übersicht (Mod)
+# Kingdoms Reborn: Upgrade-Übersicht (Mod)
 
 Zeigt im Statistik-Fenster (Tab **Buildings**) eine Übersicht aller Gebäude,
 die du bereits einmal angeklickt hast: welche Upgrades es gibt, was schon
 gekauft ist und was noch fehlt. Von dort aus lässt sich auch direkt upgraden
-und zwischen den Gebäuden springen – ohne jedes einzeln im Spiel anzuklicken.
-
-Keine Tastenkombination nötig, alles läuft über Mausklick.
+und zwischen den Gebäuden springen, ohne jedes einzeln im Spiel anzuklicken.
 
 ## Installation
 
@@ -37,7 +35,7 @@ Es gibt zwei ZIP-Dateien. Lies zuerst, welche du brauchst.
    ```
 4. Spiel starten.
 
-**Im Zweifel** die erste Variante (mit UE4SS) nehmen – schadet nicht, auch
+**Im Zweifel** die erste Variante (mit UE4SS) nehmen: schadet nicht, auch
 wenn UE4SS schon da ist, überschreibt nur mit derselben Version.
 
 ## Bedienung
@@ -47,7 +45,7 @@ wenn UE4SS schon da ist, überschreibt nur mit derselben Version.
 - Klick auf einen Gebäudenamen → springt zu einem Gebäude dieses Typs; bei
   mehreren geht jeder weitere Klick zum nächsten.
 - Klick auf ein offenes Upgrade → kauft es (das Gebäude muss dafür gerade
-  ausgewählt sein – sonst springt der erste Klick erst hin).
+  ausgewählt sein, sonst springt der erste Klick erst hin).
 
 ## Bei Problemen
 
