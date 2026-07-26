@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v15
+    KRBuildingUpgrades v16
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -1227,10 +1227,15 @@ end
 ]]
 local PANEL_FRACTION = { L = 0.395, T = 0.205, R = 0.760, B = 0.800 }
 
--- Collapsed, only the header row remains. The strip is deliberately
--- narrow: the building table underneath should be visible and clickable
--- again, otherwise there'd be no point to the toggle.
-local PANEL_FRACTION_COLLAPSED = { L = 0.395, T = 0.205, R = 0.760, B = 0.245 }
+--[[
+    Collapsed, only the header row remains.
+
+    Pulled up to the top edge of the window: at 0.205 the strip landed right
+    on the table's column headings, so it read as something floating over
+    the list rather than as its title bar. Up here it overlaps the window's
+    own "Buildings" caption instead - decoration rather than information.
+]]
+local PANEL_FRACTION_COLLAPSED = { L = 0.395, T = 0.155, R = 0.760, B = 0.195 }
 
 local function CurrentFraction()
     if Settings.collapsed then return PANEL_FRACTION_COLLAPSED end
@@ -1494,12 +1499,32 @@ local function ApplyTextColor(Text, C, Alpha)
     end)
     pcall(function() Text:SetColorAndOpacity(Text.ColorAndOpacity) end)
 
-    local R, A = nil, nil
+    --[[
+        This last call is not about the alpha - it is what makes the colour
+        count at all.
+
+        FSlateColor only uses SpecifiedColor when ColorUseRule says so;
+        otherwise it falls back to the inherited style, which is white.
+        Writing that byte through the property does not take, so the value
+        landed correctly and was then ignored - the log said the colour
+        "works" while every row rendered white.
+
+        UTextBlock::SetOpacity reads GetSpecifiedColor (whatever we just
+        wrote), replaces the alpha, and re-wraps it as FSlateColor(colour) -
+        and that constructor sets the rule to Specified. So it carries the
+        hue through and flips the switch that the direct write could not.
+    ]]
+    pcall(function() Text:SetOpacity(Alpha) end)
+
+    local R, A, Rule = nil, nil, nil
     pcall(function()
         R = Text.ColorAndOpacity.SpecifiedColor.R
         A = Text.ColorAndOpacity.SpecifiedColor.A
+        Rule = Text.ColorAndOpacity.ColorUseRule
     end)
-    return Near(R, C.R, 0.02) and Near(A, Alpha, 0.02)
+    -- A stored colour that the rule ignores is not applied, so the rule is
+    -- part of the check.
+    return Near(R, C.R, 0.02) and Near(A, Alpha, 0.02) and (Rule == 0)
 end
 
 local function LogPlacement(P)
@@ -2650,7 +2675,7 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v15 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v16 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
