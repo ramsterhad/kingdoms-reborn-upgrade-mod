@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v17
+    KRBuildingUpgrades v18
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -1978,22 +1978,56 @@ end
     it cannot fix is which upgrades a building has already bought - that is
     genuinely per building and still needs a scan.
 ]]
+local function ParseCost(Cost)
+    if not Cost or Cost == "" then return nil end
+    local Res, Amount = Cost:match("^(%S+)%s+(%d+)$")
+    if Res then return Res, tonumber(Amount) end
+    return nil
+end
+
 local function RefreshAffordability(Scraped)
-    local Known = {}
+    --[[
+        Every price the panel shows bounds the stockpile.
+
+        "273 stone is affordable" means there are at least 273 stone, so
+        anything up to 273 is affordable too. "363 stone is not" means there
+        are fewer than 363, so anything from 363 up is out of reach as well.
+        Two prices on one panel therefore settle most of the list, not just
+        the prices that happen to match exactly - which is why spending
+        stone now turns other stone upgrades red without a scan.
+
+        Between the two bounds nothing is claimed and the old verdict stands.
+    ]]
+    local Most, Least = {}, {}
     for _, U in ipairs(Scraped.upgrades) do
-        if U.state == "open" and U.cost and U.cost ~= "" then
-            Known[U.cost] = (U.affordable == true)
+        if U.state == "open" then
+            local R, A = ParseCost(U.cost)
+            if R and U.affordable then
+                if not Most[R] or A > Most[R] then Most[R] = A end
+            elseif R then
+                if not Least[R] or A < Least[R] then Least[R] = A end
+            end
         end
     end
-    if not next(Known) then return false end
+    if not next(Most) and not next(Least) then return false end
 
     local Changed = false
     for _, B in ipairs(ScanData.Buildings) do
         for _, U in ipairs(B.upgrades) do
-            local Now = U.cost and Known[U.cost]
-            if U.state == "open" and Now ~= nil and (U.affordable == true) ~= Now then
-                U.affordable = Now
-                Changed = true
+            if U.state == "open" then
+                local R, A = ParseCost(U.cost)
+                local Verdict = nil
+                if R then
+                    if Most[R] and A <= Most[R] then Verdict = true end
+                    -- Checked second so that on contradictory readings the
+                    -- cautious answer wins: showing a purchase as out of
+                    -- reach is harmless, offering one that fails is not.
+                    if Least[R] and A >= Least[R] then Verdict = false end
+                end
+                if Verdict ~= nil and (U.affordable == true) ~= Verdict then
+                    U.affordable = Verdict
+                    Changed = true
+                end
             end
         end
     end
@@ -2039,11 +2073,25 @@ local function RefreshSelectedEntry(Key, Scraped)
     for i, U in ipairs(Scraped.upgrades) do
         local E = Entry.upgrades[i]
         if E.label ~= U.label then return false end
+
+        --[[
+            A bought upgrade never becomes unbought.
+
+            The game needs a moment to rebuild the description panel after a
+            purchase, so the scrape right after buying can still report the
+            old "open". Taking that at face value flipped the row back to
+            green for a second before the next scrape corrected it - the
+            grey/green/grey flicker. Nothing in this game un-buys an
+            upgrade, so a done that turns open again is always stale data.
+        ]]
+        if E.state == "done" and U.state ~= "done" then goto continue end
+
         if E.state ~= U.state or (E.cost or "") ~= (U.cost or "") then
             E.state, E.cost = U.state, U.cost
             E.affordable = (U.affordable == true)
             Changed = true
         end
+        ::continue::
     end
     return Changed
 end
@@ -2783,7 +2831,7 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v17 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v18 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
