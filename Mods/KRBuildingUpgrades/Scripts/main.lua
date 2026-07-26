@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v24
+    KRBuildingUpgrades v25
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -173,10 +173,21 @@
     left a purchase paid in SteelTools or in coin with no column to move,
     reported as "nothing dropped", and those resources unnamed for good.
 
+    v25 takes the assumption out. The bar's entries are pooled widgets
+    handed out by PunGameInstance and re-parented into whichever list needs
+    them - the dump shows the same object in up to seven places - so nothing
+    said position 4 would still be Stone next session. A measured column is
+    therefore a hypothesis, not a fact, and it stays under test: every price
+    on the open panel is a statement about the stockpile ("273 Stone
+    affordable" means at least 273 are in store), and a column that
+    contradicts one is dropped on the spot. Dropping costs nothing, since
+    the colours then come from the bounds again, which is what they did
+    before any of this existed.
+
     These versions only take the measurement and write down what they find -
     every reading in full, since a run that identifies nothing has to be
     diagnosable from the log alone. Colouring rows from live stock is the
-    step after, once enough columns have names.
+    step after, once enough columns have names and have held up.
 ]]
 
 local RECON_FILE = "KRRecon.txt"
@@ -518,9 +529,25 @@ local COLUMNS_KEY  = "__columns"
     that fell by the amount on the price tag IS Stone. An equation, not a
     guess, and each one holds for good, so it is written to the cache.
 
-    Filled in by RunBarExperiment further down.
+    But a proven column is a hypothesis, not a fact. The entries are pooled
+    widgets handed out by PunGameInstance and re-parented into whichever
+    list needs them - the dump shows the same object in up to seven places -
+    so nothing says position 4 is still Stone next session. Measuring only
+    produces a candidate; VerifyResourceColumns keeps it under test.
+
+    Filled in by FinishBarExperiment further down.
 ]]
-local ResourceColumns = {}   -- resource name -> column index in the bar
+local ResourceColumns = {}   -- resource name -> "<list>#<position>"
+
+-- Production and consumption keep running between any two readings, so no
+-- comparison against a stockpile can demand an exact figure. This is the
+-- room given, whichever is larger.
+local BAR_TOLERANCE_ABS = 3
+local BAR_TOLERANCE_REL = 0.02
+
+-- Defined down in the resource-bar section, needed up here by the check
+-- that keeps a named column honest.
+local ReadResourceBar
 local Settings = { collapsed = true }
 
 --[[
@@ -2072,6 +2099,54 @@ local function ParseCost(Cost)
     return nil
 end
 
+--[[
+    Keeping a named column under test.
+
+    A column was proven by one measurement, and the entries of the bar are
+    pooled widgets that get re-parented between lists - so the mapping could
+    silently go stale between sessions and then colour rows from the wrong
+    number, which is worse than the guesswork it replaced.
+
+    The game supplies a second opinion every second, for free. Every price
+    on the open panel is a statement about the stockpile: "273 Stone
+    affordable" means at least 273 are in store, "363 Stone not affordable"
+    means fewer than 363. A column that contradicts those is wrong -
+    provably, not probably - and it goes.
+
+    Dropping costs nothing. Without a column the colours come from the
+    bounds again, which is what they did before any of this existed, and the
+    next purchase of that resource measures it afresh.
+]]
+local function VerifyResourceColumns(Most, Least)
+    if not next(ResourceColumns) or not ReadResourceBar then return end
+    local Bar = ReadResourceBar()
+    if not Bar then return end
+
+    for R, Column in pairs(ResourceColumns) do
+        local V = Bar[Column]
+        local Why = nil
+        if V then
+            -- Slack, because production moves the stockpile between the
+            -- panel reading and this one. Erring towards keeping: a wrong
+            -- column is caught by the next contradiction anyway, whereas
+            -- dropping on noise would mean never keeping anything.
+            local Slack = math.max(BAR_TOLERANCE_ABS, V * BAR_TOLERANCE_REL)
+            if Most[R] and V + Slack < Most[R] then
+                Why = string.format("the game affords %d, the column shows %d", Most[R], V)
+            elseif Least[R] and V - Slack >= Least[R] then
+                Why = string.format("the game cannot afford %d, the column shows %d",
+                    Least[R], V)
+            end
+        end
+        if Why then
+            Log(string.format("[bar] DROPPED %s = %s: %s. Re-measured on the next purchase.",
+                R, Column, Why))
+            ResourceColumns[R] = nil
+            CacheDirty = true
+        end
+    end
+end
+
 local function RefreshAffordability(Scraped)
     --[[
         Every price the panel shows bounds the stockpile.
@@ -2097,6 +2172,7 @@ local function RefreshAffordability(Scraped)
         end
     end
     if not next(Most) and not next(Least) then return false end
+    VerifyResourceColumns(Most, Least)
 
     local Changed = false
     for _, B in ipairs(ScanData.Buildings) do
@@ -2866,11 +2942,6 @@ end
 -- enough that production has barely moved anything.
 local BAR_SETTLE_POLLS = 8
 
--- Production and consumption keep running between the two readings, so an
--- exact hit cannot be demanded. This is the room given, whichever is larger.
-local BAR_TOLERANCE_ABS = 3
-local BAR_TOLERANCE_REL = 0.02
-
 local BarProbe = { Before = nil, Res = nil, Want = nil, Wait = 0 }
 
 --[[
@@ -2903,7 +2974,7 @@ end
     number would have done once more than one list is read. Entries that
     carry no number at all are left out instead of counted as zero.
 ]]
-local function ReadResourceBar()
+function ReadResourceBar()
     local UI = GetMainGameUI()
     if not UI then return nil end
 
@@ -3586,7 +3657,7 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v24 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v25 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
