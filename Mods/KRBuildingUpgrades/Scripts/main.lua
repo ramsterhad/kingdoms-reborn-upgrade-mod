@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v16
+    KRBuildingUpgrades v17
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -731,7 +731,13 @@ local function FormatCost(Cost)
 end
 
 local function BuildHeaderText(TypeCount, OpenCount)
-    local Mark = Settings.collapsed and "[+]" or "[-]"
+    -- Collapsed it is a badge a tenth of the width, so it says the one
+    -- number worth knowing at a glance and nothing else.
+    if Settings.collapsed then
+        if TypeCount == 0 then return "[+] KR" end
+        return string.format("[+] %d open", OpenCount)
+    end
+
     local Body
     if Notice.Text and Notice.Ticks > 0 then
         Body = Notice.Text
@@ -741,7 +747,7 @@ local function BuildHeaderText(TypeCount, OpenCount)
         Body = string.format("KR Upgrade Overview - %d building types, %d open",
             TypeCount, OpenCount)
     end
-    return string.format("%s  %s", Mark, Body)
+    return string.format("[-]  %s", Body)
 end
 
 --[[
@@ -1228,14 +1234,16 @@ end
 local PANEL_FRACTION = { L = 0.395, T = 0.205, R = 0.760, B = 0.800 }
 
 --[[
-    Collapsed, only the header row remains.
+    Collapsed, it shrinks to a badge in the table's own header row, sitting
+    above the column of magnifier buttons.
 
-    Pulled up to the top edge of the window: at 0.205 the strip landed right
-    on the table's column headings, so it read as something floating over
-    the list rather than as its title bar. Up here it overlaps the window's
-    own "Buildings" caption instead - decoration rather than information.
+    Every full-width position was wrong in a different way: at 0.205 the
+    strip lay across the column headings, and pulled up to 0.155 it covered
+    the window caption instead. That corner is the one place in the header
+    that carries nothing - the magnifiers below it have no heading of their
+    own. Small enough to cover nothing, still the way back to the list.
 ]]
-local PANEL_FRACTION_COLLAPSED = { L = 0.395, T = 0.155, R = 0.760, B = 0.195 }
+local PANEL_FRACTION_COLLAPSED = { L = 0.665, T = 0.196, R = 0.760, B = 0.234 }
 
 local function CurrentFraction()
     if Settings.collapsed then return PANEL_FRACTION_COLLAPSED end
@@ -1954,6 +1962,92 @@ local function ScanEntry(Key, Ord)
     return nil
 end
 
+--[[
+    Keeping the snapshot honest between scans.
+
+    A snapshot records what the game said at the time, and the game says
+    "too expensive" against the stockpile of that moment. Earn 20 more
+    stone and the list is quietly wrong until the next scan.
+
+    The saving grace: whether you can afford 130 stone is a fact about the
+    TOWN, not about the building - the stockpile is shared. So one open
+    description panel answers it for every identical price in the list. The
+    mod reads that panel once a second anyway.
+
+    That fixes the colours without ever knowing the stockpile itself. What
+    it cannot fix is which upgrades a building has already bought - that is
+    genuinely per building and still needs a scan.
+]]
+local function RefreshAffordability(Scraped)
+    local Known = {}
+    for _, U in ipairs(Scraped.upgrades) do
+        if U.state == "open" and U.cost and U.cost ~= "" then
+            Known[U.cost] = (U.affordable == true)
+        end
+    end
+    if not next(Known) then return false end
+
+    local Changed = false
+    for _, B in ipairs(ScanData.Buildings) do
+        for _, U in ipairs(B.upgrades) do
+            local Now = U.cost and Known[U.cost]
+            if U.state == "open" and Now ~= nil and (U.affordable == true) ~= Now then
+                U.affordable = Now
+                Changed = true
+            end
+        end
+    end
+    return Changed
+end
+
+--[[
+    The one building we can identify.
+
+    Only what we sent the camera to ourselves: a building clicked in the
+    world cannot be told apart from its twins, and writing the wrong entry
+    would quietly corrupt the snapshot. Within that limit this keeps a
+    freshly bought upgrade from still showing as open.
+]]
+local LastSelected = { key = nil, ord = nil }
+
+--[[
+    A purchase is the one moment the panel knows exactly what changed.
+
+    Nobody jumps after buying - the building was already selected - so
+    without this the row stayed green until the next scan. Marking it here
+    makes the list react at once; the scrape a moment later then confirms it
+    from the game, which is the authoritative version.
+]]
+local function MarkBought(Key, Ord, Label)
+    local Entry = ScanEntry(Key, Ord)
+    if not Entry then return end
+    for _, U in ipairs(Entry.upgrades) do
+        if U.label == Label then
+            U.state, U.cost, U.affordable = "done", nil, false
+            CacheDirty = true
+            return
+        end
+    end
+end
+
+local function RefreshSelectedEntry(Key, Scraped)
+    if LastSelected.key ~= Key or not LastSelected.ord then return false end
+    local Entry = ScanEntry(Key, LastSelected.ord)
+    if not Entry or #Entry.upgrades ~= #Scraped.upgrades then return false end
+
+    local Changed = false
+    for i, U in ipairs(Scraped.upgrades) do
+        local E = Entry.upgrades[i]
+        if E.label ~= U.label then return false end
+        if E.state ~= U.state or (E.cost or "") ~= (U.cost or "") then
+            E.state, E.cost = U.state, U.cost
+            E.affordable = (U.affordable == true)
+            Changed = true
+        end
+    end
+    return Changed
+end
+
 local function FireUpgrade(Key, Label, Ord)
     local LiveKey, S = LiveDescription()
     if not LiveKey then return "no building selected" end
@@ -2069,6 +2163,7 @@ local function JumpToType(Key)
     end
     C.index = C.index + 1
     JumpCursor[Key] = C
+    LastSelected.key, LastSelected.ord = Key, C.index
 
     local CErr = ClickStatRow(Rows[C.index])
     if CErr then return CErr end
@@ -2088,6 +2183,7 @@ local function JumpToOrdinal(Key, Ord)
     -- Keep the cycling cursor in step, so a later click on the type row
     -- carries on from here instead of jumping back to the front.
     JumpCursor[Key] = { index = Ord, total = #Rows }
+    LastSelected.key, LastSelected.ord = Key, Ord
 
     local CErr = ClickStatRow(Rows[Ord])
     if CErr then return CErr end
@@ -2122,9 +2218,14 @@ local function ActivateRow(M)
 
     local err = FireUpgrade(M.key, M.label, M.ord)
     if not err then
-        -- The cache still shows the upgrade as open; that clears itself up
-        -- the next time the panel is read.
+        -- Show it as bought straight away, and point the once-a-second
+        -- scrape at this building so the game gets the last word. Buying
+        -- "Upgrade Level" can change which upgrades the building offers at
+        -- all, and then only a fresh scan can sort it out.
+        MarkBought(M.key, M.ord, M.label)
+        if M.ord then LastSelected.key, LastSelected.ord = M.key, M.ord end
         SetNotice("bought: %s", M.label)
+        pcall(RefreshOverlay)
         return
     end
 
@@ -2615,7 +2716,14 @@ local function Tick()
         return
     end
 
-    if Remember(Scraped) then RefreshOverlay() end
+    -- Three things can change from one open panel: the type catalogue, the
+    -- affordability of every identical price in the list, and the state of
+    -- the one building we can identify.
+    local Changed = Remember(Scraped)
+    local Key = TypeKey(Scraped.title)
+    if RefreshAffordability(Scraped) then Changed, CacheDirty = true, true end
+    if RefreshSelectedEntry(Key, Scraped) then Changed, CacheDirty = true, true end
+    if Changed then RefreshOverlay() end
 end
 
 -- On the side: let notices in the header row expire again and write out a
@@ -2675,7 +2783,7 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v16 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v17 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
