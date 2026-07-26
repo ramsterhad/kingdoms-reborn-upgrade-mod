@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v23
+    KRBuildingUpgrades v24
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -148,7 +148,7 @@
         now labelled "(last seen)" instead of being passed off as a fact
         about the type.
 
-    What v23 adds, and how it gets round a dead end:
+    What v23/v24 add, and how they get round a dead end:
 
     Prices are coloured from what the game said the last time a building was
     looked at, so after spending the stock elsewhere a row can still read
@@ -166,7 +166,14 @@
     column that fell by the price IS Stone. An equation rather than a guess,
     and it holds for good, so it goes into the cache.
 
-    This version only takes the measurement and writes down what it finds -
+    v24 corrects the reading itself: the stockpile is not one list.
+    MainResourceList holds raw and manufactured goods, but food, fuel,
+    tools, medicine and the three luxury tiers each have their own and money
+    sits on a widget outside all of them. Reading only the first would have
+    left a purchase paid in SteelTools or in coin with no column to move,
+    reported as "nothing dropped", and those resources unnamed for good.
+
+    These versions only take the measurement and write down what they find -
     every reading in full, since a run that identifies nothing has to be
     diagnosable from the log alone. Colouring rows from live stock is the
     step after, once enough columns have names.
@@ -645,7 +652,8 @@ local function SaveCache()
         if next(ResourceColumns) then
             f:write(string.format("  [%s] = {\n", QuoteStr(COLUMNS_KEY)))
             for _, R in ipairs(SortedKeys(ResourceColumns)) do
-                f:write(string.format("    [%s] = %d,\n", QuoteStr(R), ResourceColumns[R]))
+                f:write(string.format("    [%s] = %s,\n",
+                    QuoteStr(R), QuoteStr(ResourceColumns[R])))
             end
             f:write("  },\n")
         end
@@ -711,9 +719,9 @@ local function LoadCache()
             end
         elseif Key == COLUMNS_KEY then
             if type(E) == "table" then
-                for R, Index in pairs(E) do
-                    if type(R) == "string" and type(Index) == "number" then
-                        ResourceColumns[R] = Index
+                for R, Column in pairs(E) do
+                    if type(R) == "string" and type(Column) == "string" then
+                        ResourceColumns[R] = Column
                     end
                 end
             end
@@ -742,7 +750,7 @@ local function LoadCache()
         CountEntries(Cache), CACHE_FILE,
         Dropped > 0 and string.format(" (%d placeholders discarded)", Dropped) or ""))
     for _, R in ipairs(SortedKeys(ResourceColumns)) do
-        Log(string.format("  resource column known: %s = [%d]", R, ResourceColumns[R]))
+        Log(string.format("  resource column known: %s = %s", R, ResourceColumns[R]))
     end
     if Dropped > 0 then CacheDirty = true end
 end
@@ -2865,6 +2873,21 @@ local BAR_TOLERANCE_REL = 0.02
 
 local BarProbe = { Before = nil, Res = nil, Want = nil, Wait = 0 }
 
+--[[
+    The stockpile is not one list.
+
+    MainResourceList holds raw and manufactured goods, but food, fuel,
+    tools, medicine and the three luxury tiers each have their own, and
+    money sits on a widget of its own outside all of them. Reading only the
+    first would mean a purchase paid in SteelTools or in coin could never
+    find the column it moved, and the resource would stay unnamed forever
+    while the log claimed nothing had dropped.
+]]
+local BAR_LISTS = {
+    "MainResourceList", "MainFoodList", "FuelList", "ToolsList",
+    "MedicineList", "LuxuryTier1List", "LuxuryTier2List", "LuxuryTier3List",
+}
+
 local function ParseAmount(S)
     if not S then return nil end
     local Digits = S:gsub("[^%d]", "")     -- the bar writes "14,725"
@@ -2872,29 +2895,53 @@ local function ParseAmount(S)
     return tonumber(Digits)
 end
 
--- One number per entry of MainResourceList, indexed by position. Entries
--- the town has never held read as nil rather than 0, so an unused slot is
--- not mistaken for an empty stockpile.
+--[[
+    Every number the HUD shows about the stockpile, keyed by where it sits.
+
+    The key is "<list>#<position>" rather than a bare index, so the same
+    position in two lists cannot be confused - which is exactly what a plain
+    number would have done once more than one list is read. Entries that
+    carry no number at all are left out instead of counted as zero.
+]]
 local function ReadResourceBar()
     local UI = GetMainGameUI()
     if not UI then return nil end
-    local List = nil
-    pcall(function() List = UI["MainResourceList"] end)
-    if not IsValidObj(List) then return nil end
 
-    local N = ChildCount(List)
-    if N == 0 then return nil end
-
-    local Values = {}
-    for i = 0, math.min(N, PROBE_MAX_ENTRIES) - 1 do
-        local E = ChildAt(List, i)
-        if IsValidObj(E) then
-            local Txt = nil
-            pcall(function() Txt = ReadText(E["SuffixText"]) end)
-            Values[i] = ParseAmount(Txt)
+    local Values, Order = {}, {}
+    local function Take(Key, W)
+        if not IsValidObj(W) then return end
+        local Txt = nil
+        pcall(function() Txt = ReadText(W) end)
+        if not Txt then pcall(function() Txt = DeepText(W) end) end
+        local N = ParseAmount(Txt)
+        if N then
+            Values[Key] = N
+            Order[#Order + 1] = Key
         end
     end
-    Values.n = math.min(N, PROBE_MAX_ENTRIES)
+
+    for _, ListName in ipairs(BAR_LISTS) do
+        local List = nil
+        pcall(function() List = UI[ListName] end)
+        if IsValidObj(List) then
+            for i = 0, math.min(ChildCount(List), PROBE_MAX_ENTRIES) - 1 do
+                local E = ChildAt(List, i)
+                if IsValidObj(E) then
+                    local Sfx = nil
+                    pcall(function() Sfx = E["SuffixText"] end)
+                    Take(string.format("%s#%d", ListName, i), Sfx)
+                end
+            end
+        end
+    end
+
+    -- Money is its own widget, not an entry in any list.
+    local MoneyW = nil
+    pcall(function() MoneyW = UI["Money"] end)
+    Take("Money", MoneyW)
+
+    if #Order == 0 then return nil end
+    Values.order = Order
     return Values
 end
 
@@ -2910,14 +2957,15 @@ local function LogBarExperiment(Res, Want, Before, After, Deltas, Verdict)
     local Owned = (FileHandle == nil) and OpenOut()
     Log(string.format("[bar] experiment: paid %s %d, looking for a column that dropped by it",
         Res, Want))
-    Log("[bar]   col      before       after       delta")
-    for i = 0, (Before.n or 0) - 1 do
-        local B, A, D = Before[i], After[i], Deltas[i]
-        Log(string.format("[bar]   %3d  %10s  %10s  %10s%s", i,
+    Log(string.format("[bar]   %-26s %10s %10s %10s", "column", "before", "after", "delta"))
+    local Tol = math.max(BAR_TOLERANCE_ABS, Want * BAR_TOLERANCE_REL)
+    for _, Key in ipairs(Before.order) do
+        local B, A, D = Before[Key], After[Key], Deltas[Key]
+        Log(string.format("[bar]   %-26s %10s %10s %10s%s", Key,
             B and tostring(B) or "-",
             A and tostring(A) or "-",
             D and string.format("%+d", D) or "-",
-            (D and D < 0 and math.abs(-D - Want) <= math.max(BAR_TOLERANCE_ABS, Want * BAR_TOLERANCE_REL))
+            (D and D < 0 and math.abs(-D - Want) <= Tol)
                 and "   <== matches the price" or ""))
     end
     Log("[bar] " .. Verdict)
@@ -2973,12 +3021,12 @@ local function FinishBarExperiment()
 
     local Tol = math.max(BAR_TOLERANCE_ABS, Want * BAR_TOLERANCE_REL)
     local Deltas, Hits = {}, {}
-    for i = 0, (Before.n or 0) - 1 do
-        local B, A = Before[i], After[i]
+    for _, Key in ipairs(Before.order) do
+        local B, A = Before[Key], After[Key]
         if B and A then
             local D = A - B
-            Deltas[i] = D
-            if D < 0 and math.abs(-D - Want) <= Tol then Hits[#Hits + 1] = i end
+            Deltas[Key] = D
+            if D < 0 and math.abs(-D - Want) <= Tol then Hits[#Hits + 1] = Key end
         end
     end
 
@@ -2986,17 +3034,16 @@ local function FinishBarExperiment()
     if #Hits == 1 then
         ResourceColumns[Res] = Hits[1]
         CacheDirty = true
-        Verdict = string.format("PROVEN: %s is column [%d]. %d of %d resources named so far.",
-            Res, Hits[1], CountEntries(ResourceColumns), Before.n or 0)
+        Verdict = string.format("PROVEN: %s is column %s. %d resources named so far, "
+            .. "out of %d columns read.",
+            Res, Hits[1], CountEntries(ResourceColumns), #Before.order)
     elseif #Hits == 0 then
         Verdict = string.format(
             "no column dropped by about %d (tolerance %.0f) - %s stays unknown", Want, Tol, Res)
     else
-        local Which = {}
-        for _, i in ipairs(Hits) do Which[#Which + 1] = string.format("[%d]", i) end
         Verdict = string.format(
             "ambiguous: %s all dropped by about %d - %s stays unknown, next purchase retries",
-            table.concat(Which, " "), Want, Res)
+            table.concat(Hits, " "), Want, Res)
     end
     LogBarExperiment(Res, Want, Before, After, Deltas, Verdict)
 end
@@ -3539,7 +3586,7 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v23 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v24 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
