@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v25
+    KRBuildingUpgrades v26
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -576,7 +576,7 @@ local ScanData = { At = "", Buildings = {} }
 -- Runner state for that scan. Declared alongside, because the row model,
 -- the header and SaveCache all read it; the stepping code needs the
 -- description panel and lives much further down.
-local Scan = { Active = false, Rows = nil, Index = 0, Wait = 0,
+local Scan = { Active = false, Rows = nil, Index = 0, Wait = 0, Key = nil,
                Seen = nil, Result = nil }
 
 local function CountEntries(T)
@@ -968,6 +968,22 @@ local function BuildRowModel()
                 Leaving them out made the numbering skip, so #3 could mean
                 "done" or "gone" and there was no way to tell.
             ]]
+            --[[
+                A heading per scanned type, which earlier versions dropped.
+
+                It was dropped for restating what the lines below already
+                said, and that was right while it only carried text. It now
+                carries an action nothing else offers - read every building
+                of this type again - so it earns its line back. Kept to the
+                bare name for that reason.
+            ]]
+            Rows[#Rows + 1] = {
+                kind = "type", key = Key, chip = "scan", alpha = 1.0,
+                chipAlpha = 1.0,
+                name = string.format("> %s", Key),
+                action = "scan all",
+            }
+
             for _, B in ipairs(Group) do
                 local Open = 0
                 for _, U in ipairs(B.upgrades) do
@@ -976,13 +992,13 @@ local function BuildRowModel()
                 TotalOpen = TotalOpen + Open
 
                 Rows[#Rows + 1] = {
-                    kind = "building", key = Key, ord = B.ord, chip = "jump",
+                    kind = "building", key = Key, ord = B.ord, chip = "scan",
                     -- Dimmed when there is nothing to do, but still
                     -- clickable: the chip means "this goes somewhere", and
                     -- it does. The name says whether it is worth going.
                     alpha = (Open > 0) and 1.0 or DIM_DONE, chipAlpha = 1.0,
                     name = string.format("%s #%d", Key, B.ord),
-                    action = "jump",
+                    action = "scan",
                 }
                 for _, U in ipairs(B.upgrades) do
                     UpgradeRow(Rows, Key, U, "      ", B.ord)
@@ -1004,11 +1020,11 @@ local function BuildRowModel()
 
             local N = BuildingCounts[Key]
             Rows[#Rows + 1] = {
-                kind = "type", key = Key, chip = "jump", alpha = 1.0,
+                kind = "type", key = Key, chip = "scan", alpha = 1.0,
                 name = string.format("> %s   %d/%d upgrades (last seen)%s", Key,
                     Done, #E.upgrades,
                     N and ("  |  " .. Count(N, "building")) or ""),
-                action = "jump >>",
+                action = "scan all",
             }
 
             for _, U in ipairs(E.upgrades) do
@@ -1090,7 +1106,11 @@ local COLUMN_TITLE = "Building / Upgrade"
     and is not clickable either, so fill and behaviour can never disagree.
 ]]
 local CHIP = {
-    jump = { R = 0.26, G = 0.20, B = 0.07, A = 1.0 },
+    -- Named for what the click is FOR, not for what happens on the way.
+    -- Going to a building is how it gets read; "jump" made it sound like
+    -- the trip was the point and hid that a single building can be
+    -- brought up to date on its own.
+    scan = { R = 0.26, G = 0.20, B = 0.07, A = 1.0 },
     buy  = { R = 0.11, G = 0.19, B = 0.09, A = 1.0 },
     none = { R = 0.0,  G = 0.0,  B = 0.0,  A = 0.0 },
 }
@@ -1734,7 +1754,7 @@ local function BuildOverlay()
         local SName, SAction = BuildScanRow()
         pcall(function() ScanCells.Name:SetText(FText(SName)) end)
         pcall(function() ScanCells.ChipText:SetText(FText(SAction)) end)
-        pcall(function() ApplyBrushColor(ScanCells.Chip, CHIP.jump) end)
+        pcall(function() ApplyBrushColor(ScanCells.Chip, CHIP.scan) end)
 
         Box:AddChild(HeaderBtn)
         Box:AddChild(ScanBtn)
@@ -2217,6 +2237,10 @@ local CompletePendingPurchase
 -- able to bracket it - hence the forward declaration.
 local BeginBarExperiment, CancelBarExperiment
 
+-- Defined down in the scanning section: a type row starts a run over that
+-- type, so the click handler has to reach it from up here.
+local StartScan
+
 local function QueuePurchase(Key, Ord, Label)
     Pending.key, Pending.ord, Pending.label = Key, Ord, Label
     Pending.tries = 30
@@ -2442,19 +2466,31 @@ local function Where(Index, Total)
 end
 
 local function ActivateRow(M)
+    --[[
+        A type row reads every building of that type.
+
+        It used to step to the next one and stop there, which answered
+        "show me another beekeeper" - but the question is almost always
+        "which of my beekeepers still needs something", and that needs all
+        of them read. Four steps instead of touring the whole town.
+    ]]
     if M.kind == "type" then
-        local err, Index, Total = JumpToType(M.key)
-        if err then SetNotice("%s: %s", M.key, err)
-        else SetNotice("jump to %s%s", M.key, Where(Index, Total)) end
+        pcall(StartScan, M.key)
         return
     end
 
-    -- A building heading goes to that exact one, where the type row only
-    -- steps to the next.
+    --[[
+        A building row reads that one building.
+
+        Going there IS reading it: the once-a-second scrape picks up
+        whatever the description panel shows and files it under this
+        building, because the mod sent the camera itself and so knows which
+        one it is looking at.
+    ]]
     if M.kind == "building" then
         local err, Index, Total = JumpToOrdinal(M.key, M.ord)
         if err then SetNotice("%s #%d: %s", M.key, M.ord, err)
-        else SetNotice("jump to %s%s", M.key, Where(Index, Total)) end
+        else SetNotice("scanning %s%s", M.key, Where(Index, Total)) end
         return
     end
 
@@ -2552,6 +2588,30 @@ local function ScanProgress()
     return math.min(Scan.Index, #Scan.Rows), #Scan.Rows
 end
 
+--[[
+    Folding a run into the snapshot.
+
+    A run over every building replaces the lot. A run over one type must
+    not: the other types were read just as carefully, possibly minutes ago,
+    and throwing them away would mean every partial scan cost the whole
+    overview. So a filtered run replaces only its own type and leaves the
+    rest standing.
+
+    Ordinals are per type and assigned by arrival, so replacing a type
+    wholesale keeps them consistent - which is what JumpToOrdinal walks
+    later. Merging building by building would not.
+]]
+local function MergeScanResult(Result, Key)
+    if not Key then return Result end
+
+    local Merged = {}
+    for _, B in ipairs(ScanData.Buildings) do
+        if B.key ~= Key then Merged[#Merged + 1] = B end
+    end
+    for _, B in ipairs(Result) do Merged[#Merged + 1] = B end
+    return Merged
+end
+
 local function StopScan(Reason)
     if not Scan.Active then return end
     Scan.Active = false
@@ -2560,32 +2620,52 @@ local function StopScan(Reason)
     if Done > 0 then
         local Stamp = ""
         pcall(function() Stamp = os.date("%Y-%m-%d %H:%M:%S") end)
-        ScanData = { At = Stamp, Buildings = Scan.Result }
+        ScanData = { At = Stamp, Buildings = MergeScanResult(Scan.Result, Scan.Key) }
         CacheDirty = true
     end
 
-    Scan.Rows, Scan.Result, Scan.Seen = nil, nil, nil
-    Log(string.format("Scan %s: %d buildings read", Reason, Done))
+    local What = Scan.Key or "all"
+    Scan.Rows, Scan.Result, Scan.Seen, Scan.Key = nil, nil, nil, nil
+    Log(string.format("Scan (%s) %s: %d buildings read", What, Reason, Done))
     pcall(RefreshOverlay)
 end
 
-local function StartScan()
-    local Box, Err = StatBox()
-    if not Box then
-        SetNotice("cannot scan: %s", Err or "no building table")
-        return
-    end
+--[[
+    Reading buildings, all of them or one type.
 
-    local Rows = {}
-    WalkStatRows(Box, function(_, Row) Rows[#Rows + 1] = Row end, 0)
-    if #Rows == 0 then
-        SetNotice("cannot scan: no buildings in the table")
-        return
+    Same machinery either way - selecting a building is the only way to
+    read it, and that moves the camera - but a type run is short enough to
+    be worth doing on its own. Four beekeepers take four steps instead of
+    touring the whole town for one answer.
+]]
+function StartScan(Key)
+    local Rows, Err
+    if Key then
+        Rows, Err = StatRowsFor(Key)
+        if not Rows then
+            SetNotice("cannot scan %s: %s", Key, Err or "not in the building table")
+            return
+        end
+    else
+        local Box
+        Box, Err = StatBox()
+        if not Box then
+            SetNotice("cannot scan: %s", Err or "no building table")
+            return
+        end
+        Rows = {}
+        WalkStatRows(Box, function(_, Row) Rows[#Rows + 1] = Row end, 0)
+        if #Rows == 0 then
+            SetNotice("cannot scan: no buildings in the table")
+            return
+        end
     end
 
     Scan.Active, Scan.Rows, Scan.Index, Scan.Wait = true, Rows, 0, 0
-    Scan.Seen, Scan.Result = {}, {}
-    Log(string.format("Scan started: %d buildings", #Rows))
+    Scan.Seen, Scan.Result, Scan.Key = {}, {}, Key
+    Log(string.format("Scan started: %d buildings%s", #Rows,
+        Key and (" of type " .. Key) or ""))
+    if Key then SetNotice("scanning %s: %s", Key, Count(#Rows, "building")) end
     pcall(RefreshOverlay)
 end
 
@@ -2598,6 +2678,11 @@ local function ScanStep()
     -- same order JumpToOrdinal walks later.
     if Scan.Index >= 1 then
         local LiveKey, S = LiveDescription()
+        -- A filtered run records only its own type. Clicking a stat row
+        -- can land on the wrong building if the table shifted, and filing
+        -- that under the scanned key would invent a building that is not
+        -- there.
+        if LiveKey and Scan.Key and LiveKey ~= Scan.Key then LiveKey = nil end
         if LiveKey and S then
             local Ord = (Scan.Seen[LiveKey] or 0) + 1
             Scan.Seen[LiveKey] = Ord
@@ -3657,10 +3742,10 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v25 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v26 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
-    .. "chip on the right do something - gold jumps to a building, green "
-    .. "buys that upgrade on the building the row names. Upgrades you "
+    .. "chip on the right do something - 'scan' reads a building or a whole "
+    .. "type, green buys that upgrade on the building the row names. Upgrades you "
     .. "can't afford have no chip and are not clickable.")

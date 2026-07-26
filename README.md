@@ -49,8 +49,10 @@ zugeklappt, damit die Gebäudetabelle darunter frei bleibt.
   zählt dabei mit; ein zweiter Klick bricht ab. **Die Kamera wandert dabei
   durch die Stadt** — das ist normal, es ist der einzige Weg, ein Gebäude
   auszulesen.
-- **Gebäudezeile** (z. B. `Beekeeper #2`) springt zu genau diesem Gebäude.
-  Gedimmt heißt: dort ist nichts mehr zu tun.
+- **Typzeile** (z. B. `> Beekeeper`) liest alle Gebäude dieses Typs ein.
+  Kürzer als `collect all information`, wenn nur ein Typ interessiert.
+- **Gebäudezeile** (z. B. `Beekeeper #2`) liest genau dieses eine Gebäude
+  ein. Gedimmt heißt: dort ist nichts mehr zu tun.
 - **Upgradezeile** kauft das Upgrade. Ist das Gebäude gerade nicht
   ausgewählt, springt der erste Klick hin und der zweite kauft.
 
