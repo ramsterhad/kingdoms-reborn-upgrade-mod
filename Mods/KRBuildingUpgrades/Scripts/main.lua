@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v29
+    KRBuildingUpgrades v30
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -3066,15 +3066,30 @@ end
 ]]
 local IconJoinLogged = false
 
+--[[
+    Counted at every step, so a run that joins nothing still says why.
+
+    There are four places this can come up empty - no rows found, rows
+    without a readable name, icons that yield no material, or two sets of
+    materials that simply do not overlap - and they call for completely
+    different answers. Reporting only success would make every failed
+    attempt cost a restart to learn nothing.
+]]
+local IconJoinReport = nil
+
 local function MapResourcesByIcon()
+    local Tally = { rows = 0, live = 0, named = 0, rowIcons = 0,
+                    barEntries = 0, barIcons = 0, joined = 0 }
+
     local Rows = FindAllOf("ResourceStatTableRow_C")
-    if not Rows then return nil end
+    if Rows then Tally.rows = #Rows end
 
     local ByIcon, Named = {}, 0
-    for _, Row in ipairs(Rows) do
+    for _, Row in ipairs(Rows or {}) do
         local Full = FullName(Row)
         if IsValidObj(Row) and not Full:find("Default__", 1, true)
            and not Full:find("WidgetArchetype", 1, true) then
+            Tally.live = Tally.live + 1
             local Img, Name = nil, nil
             pcall(function() Img = Row["ResourceImage"] end)
             pcall(function() Name = ReadText(Row["ResourceText"]) end)
@@ -3087,37 +3102,65 @@ local function MapResourcesByIcon()
                 text would throw the genuine one away the moment a town
                 stored any.
             ]]
+            if Key then Tally.rowIcons = Tally.rowIcons + 1 end
+            if Name and Name ~= "" then Tally.named = Tally.named + 1 end
             if Key and Name and Name ~= "" then
                 ByIcon[Key] = Name
                 Named = Named + 1
             end
         end
     end
-    if Named == 0 then return nil end
 
     local Bar = ReadResourceBar()
-    if not Bar then return nil end
-
     local Map, Hits = {}, 0
-    for _, Column in ipairs(Bar.order) do
-        local Key = Bar.icons[Column]
-        local Name = Key and ByIcon[Key]
-        if Name then
-            Map[Name] = Column
-            Hits = Hits + 1
+    if Bar then
+        Tally.barEntries = #Bar.order
+        for _, Column in ipairs(Bar.order) do
+            local Key = Bar.icons[Column]
+            if Key then Tally.barIcons = Tally.barIcons + 1 end
+            local Name = Key and ByIcon[Key]
+            if Name then
+                Map[Name] = Column
+                Hits = Hits + 1
+            end
         end
     end
+    Tally.joined = Hits
+
+    -- Said once, and again whenever any of it changes - a tab the player
+    -- opens later moves these numbers, and that is the moment worth seeing.
+    local Line = string.format("[join] stat rows %d (%d live, %d named, %d with icon) | "
+        .. "bar entries %d (%d with icon) | joined %d",
+        Tally.rows, Tally.live, Tally.named, Tally.rowIcons,
+        Tally.barEntries, Tally.barIcons, Tally.joined)
+    if Line ~= IconJoinReport then
+        IconJoinReport = Line
+        Log(Line)
+        if Tally.rowIcons == 0 and Tally.live > 0 then
+            Log("[join]   rows are there but no icon material - GetDynamicMaterial "
+                .. "gave nothing, so the icon is not the identifier after all")
+        elseif Tally.live == 0 then
+            Log("[join]   no live stat rows - the resource table has not been "
+                .. "shown yet, so its rows do not exist")
+        elseif Tally.barIcons == 0 then
+            Log("[join]   bar entries carry no icon material")
+        elseif Tally.joined == 0 then
+            Log("[join]   both sides have icons but none is shared - the two "
+                .. "do not use the same material objects")
+        end
+    end
+
+    if Hits == 0 then return nil end
     return Map, Hits, Named, Bar
 end
 
 local function ProbeIconJoin()
-    if IconJoinLogged then return end
     -- Same quiet-state gate the other probes use: only with the panel up
     -- and nothing else running, never while the game is mid-scan.
     if Scan.Active or not Overlay.Mounted or not IsValidObj(Overlay.Root) then return end
 
     local Map, Hits, Named, Bar = MapResourcesByIcon()
-    if not Map or Hits == 0 then return end
+    if IconJoinLogged or not Map or Hits == 0 then return end
     IconJoinLogged = true
 
     local Owned = (FileHandle == nil) and OpenOut()
@@ -3788,7 +3831,7 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v29 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v30 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
