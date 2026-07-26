@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v21
+    KRBuildingUpgrades v22
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -2959,7 +2959,29 @@ local function DumpResourceBar()
         else
             Log(string.format("  [%s] %s, %d children",
                 ClassName(W), FullName(W), ChildCount(W)))
+            --[[
+                The amounts on their own, in order, in one block.
+
+                Reading them works - GetText asks the live Slate widget, and
+                that returns the real stock where the property only ever
+                gives the design-time "1,000". This list is what a mapping
+                would have to be matched against, so it is worth having
+                separately from the wall of detail below.
+            ]]
             local N = math.min(ChildCount(W), PROBE_MAX_ENTRIES)
+            Log("  amounts in order:")
+            for i = 0, N - 1 do
+                local E = ChildAt(W, i)
+                local Amount = nil
+                if IsValidObj(E) then
+                    pcall(function() Amount = ReadText(E["SuffixText"]) end)
+                    if not Amount then
+                        pcall(function() Amount = ReadText(E["PrefixText"]) end)
+                    end
+                end
+                Log(string.format("    [%2d] %s", i, Amount or "?"))
+            end
+
             for i = 0, N - 1 do
                 Log("")
                 DumpResourceEntry(ChildAt(W, i), string.format("Entry[%d]", i), 0)
@@ -2979,6 +3001,47 @@ local function DumpResourceBar()
         "SteelBeam", so the names already collected are written alongside
         for comparison.
     ]]
+    --[[
+        The last lead.
+
+        The bar gives numbers but never a name: the icons report
+        "brush: name=None", no entry carries a tooltip, and no resource enum
+        is reflected either. So position is all that is left, and position
+        only helps if something else in the game lists resources in a known
+        order WITH their names.
+
+        These three classes each pair a name with a resource somewhere in
+        the UI. If live instances exist - even hidden, pre-created ones -
+        their order may be the key that turns the bar's 23 numbers into 23
+        named amounts.
+    ]]
+    for _, CName in ipairs({ "ChooseResourceElement_C", "ManageStorageElement_C",
+                             "TradeDealResourceRow_C", "ResourceStatTableRow_C" }) do
+        Log("")
+        Log(string.format("### live %s ###", CName))
+        local Found = nil
+        pcall(function() Found = FindAllOf(CName) end)
+        if not Found then
+            Log("  none alive")
+        else
+            local n = 0
+            for _, O in pairs(Found) do
+                if IsValidObj(O) and not IsTemplate(O) and n < 40 then
+                    n = n + 1
+                    local Name, Amount = nil, nil
+                    pcall(function() Name = DeepText(O["ResourceText"], 0) end)
+                    pcall(function() Amount = DeepText(O["TargetAmount"], 0) end)
+                    if not Amount then
+                        pcall(function() Amount = DeepText(O["InventoryRichText"], 0) end)
+                    end
+                    Log(string.format("  [%d] name=%s amount=%s", n,
+                        Name or "?", Amount or "?"))
+                end
+            end
+            if n == 0 then Log("  only templates, no live instances") end
+        end
+    end
+
     Log("")
     Log("### resource names seen in upgrade prices so far ###")
     local Seen = {}
@@ -3228,7 +3291,7 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v21 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v22 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
