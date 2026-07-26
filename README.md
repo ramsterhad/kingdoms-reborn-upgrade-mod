@@ -7,36 +7,45 @@ und zwischen den Gebäuden springen, ohne jedes einzeln im Spiel anzuklicken.
 
 ## Installation
 
-Es gibt zwei ZIP-Dateien. Lies zuerst, welche du brauchst.
+### Zuerst: den richtigen Ordner öffnen
 
-### Ich weiß nicht, ob UE4SS installiert ist / spiele keine anderen Mods
+Du brauchst ihn für beide Varianten, und Steam findet ihn selbst:
 
-→ Lade **`kingdoms-reborn-upgrade-mod-mit-UE4SS.zip`** von der
-[Releases-Seite](../../releases/latest) herunter.
+1. In Steam in der **Bibliothek** mit der **rechten Maustaste** auf
+   *Kingdoms Reborn* klicken
+2. **Verwalten → Lokale Dateien durchsuchen**
+3. Im geöffneten Fenster weiter in `PunCity` → `Binaries` → `Win64`
 
-1. ZIP entpacken.
-2. **Allen** Inhalt des entpackten Ordners kopieren nach:
-   `...\Kingdoms Reborn\PunCity\Binaries\Win64\`
-   (Ordner mit gleichem Namen zusammenführen, nichts löschen, mit „Ersetzen"
-   bestätigen falls gefragt.)
-3. Spiel starten.
+Das ist der **Zielordner**. Er bleibt für den Rest der Anleitung offen.
+Du erkennst ihn daran, dass darin `PrototypeCity-Win64-Shipping.exe` liegt.
 
-### UE4SS ist bei mir schon installiert (ich spiele schon andere Mods)
+### Variante A: Ich weiß nicht, ob UE4SS installiert ist
 
-→ Oben auf dieser Seite auf **Code → Download ZIP** klicken.
+Auch richtig, wenn du keine anderen Mods spielst. Schadet nie: ist UE4SS
+schon da, wird es nur durch dieselbe Version ersetzt.
 
-1. ZIP entpacken.
-2. Den Ordner `Mods\KRBuildingUpgrades` aus der ZIP kopieren nach:
-   `...\Kingdoms Reborn\PunCity\Binaries\Win64\Mods\`
-3. Die Datei `Mods\mods.txt` (im selben `Win64`-Ordner, **nicht** die aus der
-   ZIP) mit einem Texteditor öffnen und diese Zeile ergänzen, falls sie fehlt:
+→ **`kingdoms-reborn-upgrade-mod-mit-UE4SS.zip`** von der
+[Releases-Seite](../../releases/latest) laden.
+
+1. ZIP entpacken (Rechtsklick → *Alle extrahieren*)
+2. **Alles** aus dem entpackten Ordner in den Zielordner kopieren
+3. Windows fragt nach → **„Dateien im Ziel ersetzen"** und
+   **„Ordner zusammenführen"** wählen. Nichts vorher löschen.
+4. Spiel starten
+
+### Variante B: UE4SS ist schon installiert
+
+→ Oben auf dieser Seite **Code → Download ZIP**.
+
+1. ZIP entpacken
+2. Aus der ZIP den Ordner `Mods\KRBuildingUpgrades` in den Ordner `Mods`
+   im Zielordner kopieren
+3. Im Zielordner `Mods\mods.txt` mit dem Editor öffnen (**nicht** die aus
+   der ZIP) und diese Zeile ergänzen, falls sie fehlt:
    ```
    KRBuildingUpgrades : 1
    ```
-4. Spiel starten.
-
-**Im Zweifel** die erste Variante (mit UE4SS) nehmen: schadet nicht, auch
-wenn UE4SS schon da ist, überschreibt nur mit derselben Version.
+4. Spiel starten
 
 ## Bedienung
 
