@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v26
+    KRBuildingUpgrades v27
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -548,6 +548,17 @@ local BAR_TOLERANCE_REL = 0.02
 -- Defined down in the resource-bar section, needed up here by the check
 -- that keeps a named column honest.
 local ReadResourceBar
+
+--[[
+    Does the measurement agree with the game's own list?
+
+    Statistics -> Market Price names every resource in order. If that order
+    is also the bar's order, a column proven by a purchase must land on the
+    same name - two independent routes to one answer. A mismatch says the
+    orders are unrelated and the list is names only, which is worth knowing
+    just as much.
+]]
+local CrossCheckColumn = function() end
 local Settings = { collapsed = true }
 
 --[[
@@ -3108,6 +3119,7 @@ local function FinishBarExperiment()
         Verdict = string.format("PROVEN: %s is column %s. %d resources named so far, "
             .. "out of %d columns read.",
             Res, Hits[1], CountEntries(ResourceColumns), #Before.order)
+        pcall(CrossCheckColumn, Res, Hits[1])
     elseif #Hits == 0 then
         Verdict = string.format(
             "no column dropped by about %d (tolerance %.0f) - %s stays unknown", Want, Tol, Res)
@@ -3650,6 +3662,93 @@ local RESOURCE_PROBE_SETTLE  = 3
     the rows down the first time it finds any. Cheap enough to run every
     second: two property reads and a child count until something is there.
 ]]
+--[[
+    The resource names, from the game, in the game's own order.
+
+    Statistics -> Market Price has a dropdown listing every resource by
+    name. It is a plain UMG ComboBoxString, so GetOptionCount and
+    GetOptionAtIndex hand the whole list over directly - no icons to
+    identify, no tooltips to hope for, no measuring. This is the first
+    thing found that simply states the names.
+
+    It gives no stock. What makes it worth having anyway is the ORDER: if
+    the game builds this list and the HUD bar from the same resource table,
+    then position N in the list is position N in the bar, and one read names
+    every column at once. Whether that holds is checked, not assumed - a
+    column already proven by a purchase must land on the same name, and the
+    counts must match. Both are logged either way.
+]]
+local ResourceNamesLogged = false
+local ResourceNameList = nil
+
+local function ReadResourceNames()
+    local StatUI = GetStatUI()
+    if not IsValidObj(StatUI) then return nil end
+    local Drop = nil
+    pcall(function() Drop = StatUI["MarketResourceDropdown"] end)
+    if not IsValidObj(Drop) then return nil end
+
+    local Count = nil
+    pcall(function() Count = Drop:GetOptionCount() end)
+    if type(Count) ~= "number" or Count <= 0 then return nil end
+
+    local Names = {}
+    for i = 0, Count - 1 do
+        local N = nil
+        pcall(function()
+            local S = Drop:GetOptionAtIndex(i)
+            N = type(S) == "string" and S or (S and S:ToString() or nil)
+        end)
+        Names[i] = N
+    end
+    Names.n = Count
+    return Names
+end
+
+local function ProbeResourceNames()
+    if ResourceNamesLogged then return end
+    local Names = ReadResourceNames()
+    if not Names then return end
+    ResourceNamesLogged, ResourceNameList = true, Names
+
+    local Bar = ReadResourceBar()
+    local BarCount = 0
+    if Bar then
+        for _, Key in ipairs(Bar.order) do
+            if Key:find("^MainResourceList#") then BarCount = BarCount + 1 end
+        end
+    end
+
+    local Owned = (FileHandle == nil) and OpenOut()
+    Log(string.format("=== resource names from Statistics/Market dropdown: %d ===", Names.n))
+    for i = 0, Names.n - 1 do
+        local Stock = Bar and Bar["MainResourceList#" .. i] or nil
+        Log(string.format("  [%2d] %-24s bar says %s", i, Names[i] or "?",
+            Stock and tostring(Stock) or "-"))
+    end
+    Log(string.format("  dropdown lists %d, MainResourceList holds %d entries%s",
+        Names.n, BarCount,
+        Names.n == BarCount and " - same length, positions may line up"
+                             or " - different lengths, positions do NOT line up"))
+
+    Log("=== end resource names ===")
+    if Owned then CloseOut() end
+
+    -- Anything already known from the cache can be checked straight away.
+    for R, Column in pairs(ResourceColumns) do CrossCheckColumn(R, Column) end
+end
+
+CrossCheckColumn = function(Res, Column)
+    if not ResourceNameList then return end
+    local Index = Column:match("^MainResourceList#(%d+)$")
+    if not Index then return end
+    local Named = ResourceNameList[tonumber(Index)]
+    Log(string.format("[bar] cross-check: %s was measured at %s, the game's list "
+        .. "says %s -> %s", Res, Column, Named or "?",
+        (Named == Res) and "MATCH, the two orders agree"
+                        or "MISMATCH, the orders are unrelated"))
+end
+
 local TradeRowsLogged = false
 
 local function ProbeTradeRows()
@@ -3777,6 +3876,7 @@ LoopAsync(1000, function()
         pcall(HouseKeeping)
         pcall(ProbeResourceBar)
         pcall(ProbeTradeRows)
+        pcall(ProbeResourceNames)
     end)
     return false -- false = keep running
 end)
@@ -3801,7 +3901,7 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v26 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v27 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
