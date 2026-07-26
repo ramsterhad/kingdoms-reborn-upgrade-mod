@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v25
+    KRBuildingUpgrades v26
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -3300,7 +3300,108 @@ local function DumpResourceEntry(W, Label, Depth)
     end
 end
 
+--[[
+    Where the game does print a resource name next to its stock.
+
+    The HUD bar never does: its entries are IconTextPair_C, and the class
+    itself has only IconImage, PrefixText, SuffixText and two buttons - no
+    field naming the resource, confirmed against the object dump rather than
+    guessed at runtime. Hence all the measuring.
+
+    The trade rows do. TownAutoTradeRowWidget_C, IntercityTradeRowWidget_C
+    and WorldTradeRowWidget_C each carry a ResourceTextPair holding the name
+    and an InventoryText holding this town's stock of it, side by side in
+    one row. Their UIs hang straight off PunHUD as _townAutoTradeUI and
+    _intercityTradeUI, the same way _statisticsUI and _mainGameUI do.
+
+    If those rows are populated, every resource is named and counted at once
+    and nothing has to be inferred at all. Whether they are populated before
+    the player has ever opened the window is the one thing the dump cannot
+    say, so this looks and writes down what it finds.
+]]
+local TRADE_UIS = { "_intercityTradeUI", "_townAutoTradeUI" }
+local TRADE_ROW_BOXES = {
+    "TradeRowBox", "AutoTradeRowScrollBox", "AutoImportRowsBox",
+    "AutoExportRowsBox", "ChooseResourceBox",
+}
+
+local function DumpTradeRows()
+    local HUD = GetHUD(false)
+    if not HUD then
+        Log("ERROR: PunHUD unreachable")
+        return
+    end
+
+    for _, UIName in ipairs(TRADE_UIS) do
+        local UI = nil
+        pcall(function() UI = HUD[UIName] end)
+        Log("")
+        Log(string.format("### PunHUD.%s ###", UIName))
+        if not IsValidObj(UI) then
+            Log("  invalid or not present")
+        else
+            Log(string.format("  [%s] %s", ClassName(UI), FullName(UI)))
+            for _, BoxName in ipairs(TRADE_ROW_BOXES) do
+                local Box = nil
+                pcall(function() Box = UI[BoxName] end)
+                if IsValidObj(Box) then
+                    local N = ChildCount(Box)
+                    Log(string.format("  %s: [%s] %d rows", BoxName, ClassName(Box), N))
+                    for i = 0, math.min(N, PROBE_MAX_ENTRIES) - 1 do
+                        local Row = ChildAt(Box, i)
+                        local Name, Stock = nil, nil
+                        if IsValidObj(Row) then
+                            -- The name sits inside an IconTextPair, so it
+                            -- takes the nested reader, not a plain one.
+                            pcall(function() Name = DeepText(Row["ResourceTextPair"]) end)
+                            if not Name then pcall(function() Name = DeepText(Row["ResourceText"]) end) end
+                            pcall(function() Stock = ReadText(Row["InventoryText"]) end)
+                        end
+                        Log(string.format("    [%2d] %-24s stock=%-12s [%s]", i,
+                            Name or "?", Stock or "?",
+                            IsValidObj(Row) and ClassName(Row) or "invalid"))
+                    end
+                else
+                    Log(string.format("  %s: invalid or not present", BoxName))
+                end
+            end
+        end
+    end
+
+    -- Second route to the same rows, in case the containers above are not
+    -- how they are reached: ask for the classes directly. Archetypes and
+    -- class defaults have to be filtered out - that trap broke v1 and v2.
+    for _, CName in ipairs({ "TownAutoTradeRowWidget_C", "IntercityTradeRowWidget_C",
+                             "WorldTradeRowWidget_C", "ChooseResourceElement_C" }) do
+        local Found = FindAllOf(CName)
+        local Live = 0
+        Log("")
+        Log(string.format("### FindAllOf(%s) ###", CName))
+        if not Found then
+            Log("  none at all")
+        else
+            for _, Row in ipairs(Found) do
+                local Full = FullName(Row)
+                if IsValidObj(Row) and not Full:find("Default__", 1, true)
+                   and not Full:find("WidgetArchetype", 1, true) then
+                    Live = Live + 1
+                    if Live <= PROBE_MAX_ENTRIES then
+                        local Name, Stock = nil, nil
+                        pcall(function() Name = DeepText(Row["ResourceTextPair"]) end)
+                        if not Name then pcall(function() Name = DeepText(Row["ResourceText"]) end) end
+                        pcall(function() Stock = ReadText(Row["InventoryText"]) end)
+                        Log(string.format("  %-24s stock=%s", Name or "?", Stock or "?"))
+                    end
+                end
+            end
+            Log(string.format("  %d of %d instances alive", Live, #Found))
+        end
+    end
+end
+
 local function DumpResourceBar()
+    DumpTradeRows()
+
     local UI = GetMainGameUI()
     if not UI then
         Log("ERROR: MainGameUI unreachable - PunHUD._mainGameUI invalid")
@@ -3537,6 +3638,48 @@ local ResourceProbe = { Attempts = 0, Settled = 0 }
 local RESOURCE_PROBE_GIVE_UP = 600
 local RESOURCE_PROBE_SETTLE  = 3
 
+--[[
+    Watching for the trade rows to fill up.
+
+    They are the one place the game prints a resource name next to that
+    town's stock of it, so if they are populated nothing has to be measured
+    or inferred at all. What the object dump cannot say is WHEN they are
+    populated - possibly only once the player has opened the trade window.
+
+    So this keeps looking instead of dumping once and giving up, and writes
+    the rows down the first time it finds any. Cheap enough to run every
+    second: two property reads and a child count until something is there.
+]]
+local TradeRowsLogged = false
+
+local function ProbeTradeRows()
+    if TradeRowsLogged then return end
+
+    local HUD = GetHUD(false)
+    if not HUD then return end
+
+    local Populated = false
+    for _, UIName in ipairs(TRADE_UIS) do
+        local UI = nil
+        pcall(function() UI = HUD[UIName] end)
+        if IsValidObj(UI) then
+            for _, BoxName in ipairs(TRADE_ROW_BOXES) do
+                local Box = nil
+                pcall(function() Box = UI[BoxName] end)
+                if IsValidObj(Box) and ChildCount(Box) > 0 then Populated = true end
+            end
+        end
+    end
+    if not Populated then return end
+
+    TradeRowsLogged = true
+    local Owned = (FileHandle == nil) and OpenOut()
+    Log("=== trade rows populated - resource names with stock ===")
+    pcall(DumpTradeRows)
+    Log("=== end trade rows ===")
+    if Owned then CloseOut() end
+end
+
 local function ProbeResourceBar()
     if AutoDumped["resources"] or ResourceProbe.Attempts >= RESOURCE_PROBE_GIVE_UP then
         return
@@ -3633,6 +3776,7 @@ LoopAsync(1000, function()
         end
         pcall(HouseKeeping)
         pcall(ProbeResourceBar)
+        pcall(ProbeTradeRows)
     end)
     return false -- false = keep running
 end)
@@ -3657,7 +3801,7 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v25 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v26 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
