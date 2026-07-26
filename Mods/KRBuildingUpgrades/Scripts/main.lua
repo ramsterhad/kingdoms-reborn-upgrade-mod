@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v25
+    KRBuildingUpgrades v29
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -2974,12 +2974,43 @@ end
     number would have done once more than one list is read. Entries that
     carry no number at all are left out instead of counted as zero.
 ]]
+--[[
+    The identifier a resource actually has.
+
+    Not a name, not an enum, not a position: the ICON. Every resource gets
+    one MaterialInstanceDynamic from GameManager.AssetLoader, and every
+    widget that shows that resource points its brush at the same one - the
+    dump has each of them appearing three to six times over. Two widgets
+    showing the same material are showing the same resource. That is the
+    primary key, and the game hands it out itself.
+
+    Read through GetDynamicMaterial rather than off Brush.ResourceObject.
+    Brush is a StructProperty, and dereferencing one of those on a widget
+    the game is halfway through building is what took the game down twice.
+    GetDynamicMaterial is a reflected function returning an object, so it
+    stays inside what is safe to touch.
+
+    Only good within a session - the pointers are new every launch - which
+    is exactly right: it gets re-derived for free each time and can never go
+    stale, unlike anything written to the cache.
+]]
+local function IconKey(Img)
+    if not IsValidObj(Img) then return nil end
+    local M = nil
+    pcall(function() M = Img:GetDynamicMaterial() end)
+    if not IsValidObj(M) then return nil end
+    local N = nil
+    pcall(function() N = M:GetFullName() end)
+    if type(N) ~= "string" or N == "" then return nil end
+    return N
+end
+
 function ReadResourceBar()
     local UI = GetMainGameUI()
     if not UI then return nil end
 
-    local Values, Order = {}, {}
-    local function Take(Key, W)
+    local Values, Order, Icons = {}, {}, {}
+    local function Take(Key, W, Img)
         if not IsValidObj(W) then return end
         local Txt = nil
         pcall(function() Txt = ReadText(W) end)
@@ -2988,6 +3019,7 @@ function ReadResourceBar()
         if N then
             Values[Key] = N
             Order[#Order + 1] = Key
+            Icons[Key] = IconKey(Img)
         end
     end
 
@@ -2998,9 +3030,10 @@ function ReadResourceBar()
             for i = 0, math.min(ChildCount(List), PROBE_MAX_ENTRIES) - 1 do
                 local E = ChildAt(List, i)
                 if IsValidObj(E) then
-                    local Sfx = nil
+                    local Sfx, Img = nil, nil
                     pcall(function() Sfx = E["SuffixText"] end)
-                    Take(string.format("%s#%d", ListName, i), Sfx)
+                    pcall(function() Img = E["IconImage"] end)
+                    Take(string.format("%s#%d", ListName, i), Sfx, Img)
                 end
             end
         end
@@ -3013,7 +3046,104 @@ function ReadResourceBar()
 
     if #Order == 0 then return nil end
     Values.order = Order
+    Values.icons = Icons
     return Values
+end
+
+--[[
+    Joining the two halves over the icon.
+
+    The statistics window's resource table gives a name and an icon per row.
+    The HUD bar gives an amount and an icon per entry. Same icon means same
+    resource, so the two join into name and amount without measuring
+    anything, without assuming any ordering, and without the player being
+    asked to do a thing.
+
+    Rebuilt from scratch whenever it runs. The bar grows as the town first
+    stores a resource it never had, which shifts every entry behind it - so
+    a mapping is only ever valid for the moment it was read, and this is
+    cheap enough to simply read again.
+]]
+local IconJoinLogged = false
+
+local function MapResourcesByIcon()
+    local Rows = FindAllOf("ResourceStatTableRow_C")
+    if not Rows then return nil end
+
+    local ByIcon, Named = {}, 0
+    for _, Row in ipairs(Rows) do
+        local Full = FullName(Row)
+        if IsValidObj(Row) and not Full:find("Default__", 1, true)
+           and not Full:find("WidgetArchetype", 1, true) then
+            local Img, Name = nil, nil
+            pcall(function() Img = Row["ResourceImage"] end)
+            pcall(function() Name = ReadText(Row["ResourceText"]) end)
+            local Key = IconKey(Img)
+            --[[
+                Kept apart from the real rows by their object path, not by
+                what they say. The blueprint's template row carries the
+                design-time name "White Mushroom " - and White Mushroom is
+                a real resource in this game, so rejecting rows by that
+                text would throw the genuine one away the moment a town
+                stored any.
+            ]]
+            if Key and Name and Name ~= "" then
+                ByIcon[Key] = Name
+                Named = Named + 1
+            end
+        end
+    end
+    if Named == 0 then return nil end
+
+    local Bar = ReadResourceBar()
+    if not Bar then return nil end
+
+    local Map, Hits = {}, 0
+    for _, Column in ipairs(Bar.order) do
+        local Key = Bar.icons[Column]
+        local Name = Key and ByIcon[Key]
+        if Name then
+            Map[Name] = Column
+            Hits = Hits + 1
+        end
+    end
+    return Map, Hits, Named, Bar
+end
+
+local function ProbeIconJoin()
+    if IconJoinLogged then return end
+    -- Same quiet-state gate the other probes use: only with the panel up
+    -- and nothing else running, never while the game is mid-scan.
+    if Scan.Active or not Overlay.Mounted or not IsValidObj(Overlay.Root) then return end
+
+    local Map, Hits, Named, Bar = MapResourcesByIcon()
+    if not Map or Hits == 0 then return end
+    IconJoinLogged = true
+
+    local Owned = (FileHandle == nil) and OpenOut()
+    Log(string.format("=== resources joined over the icon: %d of %d bar entries named "
+        .. "(%d rows in the statistics table) ===", Hits, #Bar.order, Named))
+    for _, Column in ipairs(Bar.order) do
+        local Key = Bar.icons[Column]
+        local Name = Key and Map and nil
+        for N, C in pairs(Map) do if C == Column then Name = N end end
+        Log(string.format("  %-24s -> %-20s stock=%s", Column,
+            Name or "(icon not in the table)",
+            Bar[Column] and tostring(Bar[Column]) or "-"))
+    end
+
+    -- Written where the rest of the mod already looks. Anything the icons
+    -- disagree with gets thrown out by VerifyResourceColumns as usual.
+    for Name, Column in pairs(Map) do
+        if ResourceColumns[Name] ~= Column then
+            Log(string.format("  set %s = %s%s", Name, Column,
+                ResourceColumns[Name] and (" (was " .. ResourceColumns[Name] .. ")") or ""))
+            ResourceColumns[Name] = Column
+            CacheDirty = true
+        end
+    end
+    Log("=== end icon join ===")
+    if Owned then CloseOut() end
 end
 
 --[[
@@ -3633,6 +3763,7 @@ LoopAsync(1000, function()
         end
         pcall(HouseKeeping)
         pcall(ProbeResourceBar)
+        pcall(ProbeIconJoin)
     end)
     return false -- false = keep running
 end)
@@ -3657,7 +3788,7 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v25 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v29 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
