@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v33
+    KRBuildingUpgrades v25
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -2974,43 +2974,6 @@ end
     number would have done once more than one list is read. Entries that
     carry no number at all are left out instead of counted as zero.
 ]]
---[[
-    Why the icon is not the identifier after all.
-
-    Every resource does get a MaterialInstanceDynamic from the AssetLoader,
-    and the bar's entries do point at them - but 183 of the 190 shared
-    pointers in the dump came from IconImage, which is the bar, and none
-    from a statistics row. Worse, UImage:GetDynamicMaterial CREATES a
-    material per widget when the brush holds a plain one, and writes it back
-    into the brush. So it compared objects it had just made itself, and
-    changed the game's brushes doing it. Not called any more.
-
-    What the buttons actually need was never an identifier: it is the stock,
-    so a price can be called affordable or not. The statistics resource
-    table names a resource per row, and two of its text fields have never
-    been read - they are not blueprint variables, so they are invisible to
-    a walk over property names and only reachable through the widget tree.
-    If a stock sits in one of them, nothing has to be identified at all.
-]]
--- Every piece of text under a widget, found by walking the tree rather
--- than by property name: the interesting fields here are called
--- TextBlock_3 and TextBlock_4, so they are not variables and no reflected
--- name reaches them. Reading is GetText on a TextBlock and nothing else,
--- which is the access the rest of the mod already lives on.
-local function CollectTexts(W, Out, Depth)
-    if not IsValidObj(W) or Depth > 6 or #Out >= 24 then return end
-    local T = ReadText(W)
-    if T and T ~= "" then Out[#Out + 1] = T end
-    for i = 0, math.min(ChildCount(W), 24) - 1 do
-        CollectTexts(ChildAt(W, i), Out, Depth + 1)
-    end
-    -- A UserWidget keeps its content under WidgetTree.RootWidget, not as a
-    -- child, so the walk would stop at every row without this.
-    local Root = nil
-    pcall(function() Root = W["WidgetTree"]["RootWidget"] end)
-    if IsValidObj(Root) then CollectTexts(Root, Out, Depth + 1) end
-end
-
 function ReadResourceBar()
     local UI = GetMainGameUI()
     if not UI then return nil end
@@ -3052,22 +3015,6 @@ function ReadResourceBar()
     Values.order = Order
     return Values
 end
-
---[[
-    Joining the two halves over the icon.
-
-    The statistics window's resource table gives a name and an icon per row.
-    The HUD bar gives an amount and an icon per entry. Same icon means same
-    resource, so the two join into name and amount without measuring
-    anything, without assuming any ordering, and without the player being
-    asked to do a thing.
-
-    Rebuilt from scratch whenever it runs. The bar grows as the town first
-    stores a resource it never had, which shifts every entry behind it - so
-    a mapping is only ever valid for the moment it was read, and this is
-    cheap enough to simply read again.
-]]
-local IconJoinLogged = false
 
 --[[
     Log the whole table, not just the answer.
@@ -3589,120 +3536,6 @@ end
 local ResourceProbe = { Attempts = 0, Settled = 0 }
 local RESOURCE_PROBE_GIVE_UP = 600
 local RESOURCE_PROBE_SETTLE  = 3
---[[
-    Asking the game itself.
-
-    PunPlayerController carries two reflected debug functions:
-
-        PrintResourceSys()                 no parameters
-        PrintResourceSysFor(ResourceName)  an FString
-
-    The second one takes a resource NAME, so the game holds exactly the
-    name-to-resource lookup the UI refuses to expose. Neither returns
-    anything - they print - and a shipping build writes no log unless the
-    game is started with -log, so where the output lands has to be found
-    out rather than assumed.
-
-    Hence the markers around the call: whichever log picks the output up,
-    it will sit between them. Calling a parameterless UFunction is the same
-    thing the mod already does to buy an upgrade, so this adds no new kind
-    of risk.
-]]
-local ResourceSysCalled = false
-
-local function ProbeResourceSys()
-    if ResourceSysCalled then return end
-    if Scan.Active or not Overlay.Mounted or not IsValidObj(Overlay.Root) then return end
-
-    local PC = nil
-    local Found = FindAllOf("PunPlayerController")
-    for _, C in ipairs(Found or {}) do
-        if IsValidObj(C) and not FullName(C):find("Default__", 1, true) then PC = C end
-    end
-    if not PC then return end
-    ResourceSysCalled = true
-
-    local Owned = (FileHandle == nil) and OpenOut()
-    Log("=== KR_RESOURCE_SYS_BEGIN === " .. FullName(PC))
-    local ok, err = pcall(function() PC:PrintResourceSys() end)
-    Log("  PrintResourceSys() called: " .. (ok and "no error" or ("failed: " .. tostring(err))))
-
-    -- Named calls too: if the output is reachable at all, asking for one
-    -- resource by name says whether the game accepts these spellings - the
-    -- same ones the upgrade prices use.
-    for _, R in ipairs({ "Stone", "Wood", "Glass", "Brick", "IronBar" }) do
-        local ok2, err2 = pcall(function() PC:PrintResourceSysFor(R) end)
-        if not ok2 then
-            Log(string.format("  PrintResourceSysFor(%q) failed: %s", R, tostring(err2)))
-        end
-    end
-    Log("=== KR_RESOURCE_SYS_END ===")
-    if Owned then CloseOut() end
-end
-
---[[
-    What the statistics resource table actually holds, field by field.
-
-    The buttons need a stock, not an identity. This row names a resource and
-    carries ten production and consumption figures - plus two text fields
-    with no name of their own, never read, because they are not blueprint
-    variables. So every piece of text under a row goes to the log, in
-    order, and either a stockpile is among them or the table genuinely has
-    none and this line of enquiry is finished.
-]]
---[[
-    Never done, only ever better than last time.
-
-    The first version wrote itself off after one look and caught the table
-    at its emptiest: two template rows and a bar still showing its
-    design-time 1000s. Then it never looked again, so the session was spent.
-    The table fills up as the player opens the tab that builds it, so the
-    only sound rule is to report whenever there is more to report than
-    before.
-]]
-local ResourceTableBest = 0
-
-local function ProbeResourceTable()
-    if Scan.Active or not Overlay.Mounted or not IsValidObj(Overlay.Root) then return end
-
-    local Rows = FindAllOf("ResourceStatTableRow_C")
-    if not Rows then return end
-
-    local Live = {}
-    for _, Row in ipairs(Rows) do
-        local Full = FullName(Row)
-        if IsValidObj(Row) and not Full:find("Default__", 1, true)
-           and not Full:find("WidgetArchetype", 1, true) then
-            local Name = nil
-            pcall(function() Name = ReadText(Row["ResourceText"]) end)
-            if Name and Name ~= "" then Live[#Live + 1] = { Row = Row, Name = Name } end
-        end
-    end
-    if #Live <= ResourceTableBest then return end
-    ResourceTableBest = #Live
-
-    local Owned = (FileHandle == nil) and OpenOut()
-    Log(string.format("=== statistics resource table: %d named rows, every text field ===",
-        #Live))
-    Log("  looking for a stockpile among them; the named fields are "
-        .. "production and consumption only")
-    for i = 1, math.min(#Live, 12) do
-        local Texts = {}
-        pcall(CollectTexts, Live[i].Row, Texts, 0)
-        Log(string.format("  %-22s %s", Live[i].Name, table.concat(Texts, " | ")))
-    end
-
-    -- The bar beside it, so a stockpile in the table can be recognised by
-    -- being a figure the bar also shows.
-    local Bar = ReadResourceBar()
-    if Bar then
-        local Vals = {}
-        for _, C in ipairs(Bar.order) do Vals[#Vals + 1] = tostring(Bar[C]) end
-        Log("  bar amounts for comparison: " .. table.concat(Vals, " "))
-    end
-    Log("=== end resource table ===")
-    if Owned then CloseOut() end
-end
 
 local function ProbeResourceBar()
     if AutoDumped["resources"] or ResourceProbe.Attempts >= RESOURCE_PROBE_GIVE_UP then
@@ -3800,8 +3633,6 @@ LoopAsync(1000, function()
         end
         pcall(HouseKeeping)
         pcall(ProbeResourceBar)
-        pcall(ProbeResourceTable)
-        pcall(ProbeResourceSys)
     end)
     return false -- false = keep running
 end)
@@ -3826,7 +3657,7 @@ LoopAsync(POLL_MS, function()
     return false
 end)
 
-Log("KRBuildingUpgrades v33 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v25 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
