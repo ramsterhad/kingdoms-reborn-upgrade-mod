@@ -40,12 +40,32 @@ wenn UE4SS schon da ist, überschreibt nur mit derselben Version.
 
 ## Bedienung
 
-- Übersicht erscheint im Statistik-Fenster, Tab **Buildings**.
-- Kopfzeile anklicken → Liste auf-/zuklappen.
-- Klick auf einen Gebäudenamen → springt zu einem Gebäude dieses Typs; bei
-  mehreren geht jeder weitere Klick zum nächsten.
-- Klick auf ein offenes Upgrade → kauft es (das Gebäude muss dafür gerade
-  ausgewählt sein, sonst springt der erste Klick erst hin).
+Die Übersicht erscheint im Statistik-Fenster, Tab **Buildings**. Sie startet
+zugeklappt, damit die Gebäudetabelle darunter frei bleibt.
+
+- **Kopfzeile** anklicken klappt die Liste auf und zu. Der Zustand bleibt
+  über Spielneustarts erhalten.
+- **`collect all information`** liest alle Gebäude einmal durch. Der Balken
+  zählt dabei mit; ein zweiter Klick bricht ab. **Die Kamera wandert dabei
+  durch die Stadt** — das ist normal, es ist der einzige Weg, ein Gebäude
+  auszulesen.
+- **Gebäudezeile** (z. B. `Beekeeper #2`) springt zu genau diesem Gebäude.
+  Gedimmt heißt: dort ist nichts mehr zu tun.
+- **Upgradezeile** kauft das Upgrade. Ist das Gebäude gerade nicht
+  ausgewählt, springt der erste Klick hin und der zweite kauft.
+
+Farben in der Liste:
+
+| Farbe | Bedeutung |
+|-------|-----------|
+| grün  | kaufbar, ein Klick genügt |
+| rot   | zu teuer, nicht anklickbar |
+| grau  | schon gekauft |
+
+Ohne `collect all information` zeigt die Liste pro Gebäudetyp nur das zuletzt
+angeklickte Gebäude, erkennbar an `(last seen)`. Das ist Absicht: Upgrades
+gehören zum einzelnen Gebäude, nicht zum Typ — zwei Imkereien können
+unterschiedlich weit ausgebaut sein.
 
 ## Bei Problemen
 
