@@ -1,5 +1,5 @@
 --[[
-    KRBuildingUpgrades v22
+    KRBuildingUpgrades v23
 
     Collects, while playing, which upgrades a building type has and which of
     them are already bought, keeps that across game restarts, and shows it as
@@ -147,6 +147,29 @@
       * Types that have not been scanned still show the old single sample,
         now labelled "(last seen)" instead of being passed off as a fact
         about the type.
+
+    What v23 adds, and how it gets round a dead end:
+
+    Prices are coloured from what the game said the last time a building was
+    looked at, so after spending the stock elsewhere a row can still read
+    green. Fixing that needs the live stockpile, and v22 went looking for it:
+    MainGameUI.MainResourceList holds 23 entries whose amounts are readable,
+    and NOTHING in them says which resource each one is. The icons report no
+    texture name, no entry has a tooltip, and no resource enum is reflected.
+    ResourceStatTableRow_C does carry names, but only production and
+    consumption totals, no stock, and 23 bar entries cannot be lined up with
+    30-odd stat rows without a key.
+
+    So the name is not searched for any more, it is proven. A purchase is a
+    labelled experiment: buying "273 Stone" is a promise that one column
+    drops by exactly 273. Read the bar just before and just after, and the
+    column that fell by the price IS Stone. An equation rather than a guess,
+    and it holds for good, so it goes into the cache.
+
+    This version only takes the measurement and writes down what it finds -
+    every reading in full, since a run that identifies nothing has to be
+    diagnosable from the log alone. Colouring rows from live stock is the
+    step after, once enough columns have names.
 ]]
 
 local RECON_FILE = "KRRecon.txt"
@@ -473,6 +496,24 @@ local CacheDirty = false
 -- overview is one click away, and the state persists after that.
 local SETTINGS_KEY = "__settings"
 local SCAN_KEY     = "__scan"
+local COLUMNS_KEY  = "__columns"
+
+--[[
+    Which column of the resource bar is which resource.
+
+    The bar shows 23 numbers and refuses to say what any of them are: the
+    icons carry no texture name, no entry has a tooltip, and no resource
+    enum is reflected anywhere. That was searched for and it is not there.
+
+    So the name is not searched for, it is proven. A purchase is a labelled
+    experiment - buying "273 Stone" is a promise that one column drops by
+    exactly 273. Read the bar just before and just after, and the column
+    that fell by the amount on the price tag IS Stone. An equation, not a
+    guess, and each one holds for good, so it is written to the cache.
+
+    Filled in by RunBarExperiment further down.
+]]
+local ResourceColumns = {}   -- resource name -> column index in the bar
 local Settings = { collapsed = true }
 
 --[[
@@ -597,6 +638,18 @@ local function SaveCache()
             end
             f:write("    },\n  },\n")
         end
+
+        -- Proven once, true forever: the bar does not reshuffle itself
+        -- between sessions, so a column identified in one game is still
+        -- that resource in the next.
+        if next(ResourceColumns) then
+            f:write(string.format("  [%s] = {\n", QuoteStr(COLUMNS_KEY)))
+            for _, R in ipairs(SortedKeys(ResourceColumns)) do
+                f:write(string.format("    [%s] = %d,\n", QuoteStr(R), ResourceColumns[R]))
+            end
+            f:write("  },\n")
+        end
+
         for _, Key in ipairs(SortedKeys(Cache)) do
             local E = Cache[Key]
             f:write(string.format("  [%s] = {\n", QuoteStr(Key)))
@@ -656,6 +709,14 @@ local function LoadCache()
                 end
                 ScanData = { At = E.at or "", Buildings = Bs }
             end
+        elseif Key == COLUMNS_KEY then
+            if type(E) == "table" then
+                for R, Index in pairs(E) do
+                    if type(R) == "string" and type(Index) == "number" then
+                        ResourceColumns[R] = Index
+                    end
+                end
+            end
         elseif type(Key) == "string" and Placeholders[Key] then
             Dropped = Dropped + 1
         elseif type(Key) == "string" and type(E) == "table" and type(E.upgrades) == "table" then
@@ -680,6 +741,9 @@ local function LoadCache()
     Log(string.format("Cache loaded: %d building types from %s%s",
         CountEntries(Cache), CACHE_FILE,
         Dropped > 0 and string.format(" (%d placeholders discarded)", Dropped) or ""))
+    for _, R in ipairs(SortedKeys(ResourceColumns)) do
+        Log(string.format("  resource column known: %s = [%d]", R, ResourceColumns[R]))
+    end
     if Dropped > 0 then CacheDirty = true end
 end
 
@@ -2064,6 +2128,11 @@ local LastSelected = { key = nil, ord = nil }
 local Pending = { key = nil, ord = nil, label = nil, tries = 0 }
 local CompletePendingPurchase
 
+-- Defined down in the resource-bar section. The purchase itself is the
+-- experiment that names a column of the bar, so the buy path has to be
+-- able to bracket it - hence the forward declaration.
+local BeginBarExperiment, CancelBarExperiment
+
 local function QueuePurchase(Key, Ord, Label)
     Pending.key, Pending.ord, Pending.label = Key, Ord, Label
     Pending.tries = 30
@@ -2135,7 +2204,25 @@ local function FireUpgrade(Key, Label, Ord)
 
     local Hit = S.live and S.live[Label]
     if not Hit then return "row not found in the open panel" end
-    return CallHandler(Hit.W, Hit.Fn)
+
+    --[[
+        The purchase doubles as a measurement.
+
+        This is the only moment the mod knows both a resource name and an
+        exact amount about to leave the stockpile, which is precisely what
+        the resource bar will not tell us about itself. So the bar is read
+        on both sides of the click. If the click fails nothing was debited
+        and the reading is void.
+    ]]
+    local Cost = nil
+    for _, U in ipairs(S.upgrades or {}) do
+        if U.label == Label then Cost = U.cost break end
+    end
+    BeginBarExperiment(Cost)
+
+    local Err = CallHandler(Hit.W, Hit.Fn)
+    if Err then CancelBarExperiment() end
+    return Err
 end
 
 --[[
@@ -2757,6 +2844,163 @@ local function GetMainGameUI()
     return UI
 end
 
+--==========================================================================--
+-- Naming the columns of the resource bar
+--
+-- See ResourceColumns up in the cache section for why a purchase is the
+-- instrument here. This is the apparatus: read the bar, hold the reading
+-- across a purchase, and work out which column paid.
+--==========================================================================--
+
+-- How long to wait after the click before reading again. The game debits
+-- the stockpile and rebuilds the bar over a few frames; at 60 ms a poll
+-- this is roughly half a second, long enough to have settled and short
+-- enough that production has barely moved anything.
+local BAR_SETTLE_POLLS = 8
+
+-- Production and consumption keep running between the two readings, so an
+-- exact hit cannot be demanded. This is the room given, whichever is larger.
+local BAR_TOLERANCE_ABS = 3
+local BAR_TOLERANCE_REL = 0.02
+
+local BarProbe = { Before = nil, Res = nil, Want = nil, Wait = 0 }
+
+local function ParseAmount(S)
+    if not S then return nil end
+    local Digits = S:gsub("[^%d]", "")     -- the bar writes "14,725"
+    if Digits == "" then return nil end
+    return tonumber(Digits)
+end
+
+-- One number per entry of MainResourceList, indexed by position. Entries
+-- the town has never held read as nil rather than 0, so an unused slot is
+-- not mistaken for an empty stockpile.
+local function ReadResourceBar()
+    local UI = GetMainGameUI()
+    if not UI then return nil end
+    local List = nil
+    pcall(function() List = UI["MainResourceList"] end)
+    if not IsValidObj(List) then return nil end
+
+    local N = ChildCount(List)
+    if N == 0 then return nil end
+
+    local Values = {}
+    for i = 0, math.min(N, PROBE_MAX_ENTRIES) - 1 do
+        local E = ChildAt(List, i)
+        if IsValidObj(E) then
+            local Txt = nil
+            pcall(function() Txt = ReadText(E["SuffixText"]) end)
+            Values[i] = ParseAmount(Txt)
+        end
+    end
+    Values.n = math.min(N, PROBE_MAX_ENTRIES)
+    return Values
+end
+
+--[[
+    Log the whole table, not just the answer.
+
+    A failed experiment is worth as much as a successful one here: it says
+    whether the bar moved at all, whether production drowns the signal, and
+    whether the amount on the price tag is really what gets debited. That
+    only shows in the full before/after, so all of it goes to the file.
+]]
+local function LogBarExperiment(Res, Want, Before, After, Deltas, Verdict)
+    local Owned = (FileHandle == nil) and OpenOut()
+    Log(string.format("[bar] experiment: paid %s %d, looking for a column that dropped by it",
+        Res, Want))
+    Log("[bar]   col      before       after       delta")
+    for i = 0, (Before.n or 0) - 1 do
+        local B, A, D = Before[i], After[i], Deltas[i]
+        Log(string.format("[bar]   %3d  %10s  %10s  %10s%s", i,
+            B and tostring(B) or "-",
+            A and tostring(A) or "-",
+            D and string.format("%+d", D) or "-",
+            (D and D < 0 and math.abs(-D - Want) <= math.max(BAR_TOLERANCE_ABS, Want * BAR_TOLERANCE_REL))
+                and "   <== matches the price" or ""))
+    end
+    Log("[bar] " .. Verdict)
+    if Owned then CloseOut() end
+end
+
+--[[
+    Read the bar and remember it, so the purchase happens between two
+    readings. Costs nothing once a resource is known, which is the normal
+    case after the first few purchases.
+]]
+function BeginBarExperiment(Cost)
+    if not Cost then return end
+    local Res, Amount = Cost:match("^(%S+)%s+(%d+)$")
+    if not Res or ResourceColumns[Res] then return end
+
+    BarProbe.Before = ReadResourceBar()
+    if not BarProbe.Before then
+        Log(string.format("[bar] %s: resource bar not readable, no experiment", Res))
+        return
+    end
+    BarProbe.Res, BarProbe.Want, BarProbe.Wait = Res, tonumber(Amount), BAR_SETTLE_POLLS
+end
+
+-- The purchase did not go through, so nothing was debited and the reading
+-- would only measure production noise.
+function CancelBarExperiment()
+    BarProbe.Before, BarProbe.Res, BarProbe.Want, BarProbe.Wait = nil, nil, nil, 0
+end
+
+--[[
+    Read the bar again and see which column paid.
+
+    Accepted only when exactly one column dropped by about the price. Two
+    candidates means the reading cannot tell them apart - two resources
+    happened to move by the same amount - and a guess written down here
+    would be wrong forever, so it is thrown away and the next purchase of
+    that resource tries again.
+]]
+local function FinishBarExperiment()
+    if not BarProbe.Before then return end
+    BarProbe.Wait = BarProbe.Wait - 1
+    if BarProbe.Wait > 0 then return end
+
+    local Before, Res, Want = BarProbe.Before, BarProbe.Res, BarProbe.Want
+    CancelBarExperiment()
+
+    local After = ReadResourceBar()
+    if not After then
+        Log(string.format("[bar] %s: bar gone before the second reading", Res))
+        return
+    end
+
+    local Tol = math.max(BAR_TOLERANCE_ABS, Want * BAR_TOLERANCE_REL)
+    local Deltas, Hits = {}, {}
+    for i = 0, (Before.n or 0) - 1 do
+        local B, A = Before[i], After[i]
+        if B and A then
+            local D = A - B
+            Deltas[i] = D
+            if D < 0 and math.abs(-D - Want) <= Tol then Hits[#Hits + 1] = i end
+        end
+    end
+
+    local Verdict
+    if #Hits == 1 then
+        ResourceColumns[Res] = Hits[1]
+        CacheDirty = true
+        Verdict = string.format("PROVEN: %s is column [%d]. %d of %d resources named so far.",
+            Res, Hits[1], CountEntries(ResourceColumns), Before.n or 0)
+    elseif #Hits == 0 then
+        Verdict = string.format(
+            "no column dropped by about %d (tolerance %.0f) - %s stays unknown", Want, Tol, Res)
+    else
+        local Which = {}
+        for _, i in ipairs(Hits) do Which[#Which + 1] = string.format("[%d]", i) end
+        Verdict = string.format(
+            "ambiguous: %s all dropped by about %d - %s stays unknown, next purchase retries",
+            table.concat(Which, " "), Want, Res)
+    end
+    LogBarExperiment(Res, Want, Before, After, Deltas, Verdict)
+end
+
 -- ToolTipText is an FText on a property of its own, not the .Text that
 -- ReadText looks at, so it needs its own reader.
 local function ReadFTextProp(W, PName)
@@ -3287,11 +3531,15 @@ LoopAsync(POLL_MS, function()
         -- as the jump has brought its panel up.
         pcall(ScanStep)
         pcall(CompletePendingPurchase)
+        -- Counts down the settle time after a purchase and then takes the
+        -- second reading of the resource bar. Does nothing unless a
+        -- purchase is currently being measured.
+        pcall(FinishBarExperiment)
     end)
     return false
 end)
 
-Log("KRBuildingUpgrades v22 loaded. No keybind needed: the panel sits in "
+Log("KRBuildingUpgrades v23 loaded. No keybind needed: the panel sits in "
     .. "the statistics window, Buildings tab. Clicking the header row "
     .. "collapses it. 'collect all information' reads every building once "
     .. "(this moves the camera; click again to stop). Rows with a filled "
